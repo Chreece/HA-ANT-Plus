@@ -1,7 +1,7 @@
 """Constants for the ANT+ integration."""
 
 DOMAIN = "antplus"
-PLATFORMS = ["sensor", "switch", "button"]
+PLATFORMS = ["sensor", "switch"]
 
 ANTPLUS_NETWORK_NUMBER = 0
 ANTPLUS_RF_FREQUENCY = 57

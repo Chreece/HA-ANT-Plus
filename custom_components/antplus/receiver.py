@@ -149,12 +149,6 @@ class AntPlusReceiver:
             self._set_state("stopped")
 
 
-    def toggle(self) -> None:
-        """Toggle ANT+ capture state."""
-        if self.running:
-            self.stop()
-        else:
-            self.start()
 
     def snapshot(self) -> dict[int, AntDevice]:
         with self._lock:
