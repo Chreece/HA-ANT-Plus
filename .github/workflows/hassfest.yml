@@ -14,11 +14,10 @@ permissions:
 jobs:
   validate:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Validate with Hassfest
         uses: home-assistant/actions/hassfest@master
-        with:
-          path: custom_components/antplus
