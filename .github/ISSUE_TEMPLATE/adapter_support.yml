@@ -1,0 +1,22 @@
+name: ANT USB adapter compatibility
+description: Report a working or non-working ANT USB adapter
+title: "[Adapter]: "
+labels: [hardware]
+body:
+  - type: input
+    id: model
+    attributes:
+      label: Adapter brand/model
+    validations:
+      required: true
+  - type: input
+    id: usb
+    attributes:
+      label: USB VID:PID
+      placeholder: 0FCF:1008
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: Result and logs

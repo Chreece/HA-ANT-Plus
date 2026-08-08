@@ -1,0 +1,35 @@
+{
+  "title": "HA ANT+",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Set up HA ANT+",
+        "description": "Set up the ANT+ USB adapter connected to this Home Assistant host."
+      },
+      "usb_confirm": {
+        "title": "ANT+ USB adapter discovered",
+        "description": "Set up {name}?"
+      }
+    },
+    "error": {
+      "adapter_not_found": "No ANT+ USB adapter was found. Make sure it is connected and accessible to Home Assistant.",
+      "adapter_in_use": "The ANT+ USB adapter is already in use by another process.",
+      "permission_denied": "Home Assistant does not have permission to access the ANT+ USB adapter.",
+      "cannot_start": "The ANT+ USB adapter was found, but ANT+ communication could not be started. Check the Home Assistant logs."
+    },
+    "abort": {
+      "already_configured": "HA ANT+ is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "HA ANT+ options",
+        "description": "Live metrics become unavailable after the configured inactivity timeout. Slow/device diagnostic values remain available while the ANT+ device is still being received.",
+        "data": {
+          "inactivity_timeout": "Live metric inactivity timeout (seconds)"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,27 @@
+name: Release validation
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  validate-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify manifest version matches release tag
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          tag = os.environ["GITHUB_REF_NAME"].lstrip("v")
+          version = json.loads(
+              Path("custom_components/antplus/manifest.json").read_text()
+          )["version"]
+          if version != tag:
+              raise SystemExit(
+                  f"manifest version {version} does not match release tag {tag}"
+              )
+          PY
