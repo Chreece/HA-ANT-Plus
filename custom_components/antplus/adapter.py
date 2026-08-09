@@ -534,6 +534,35 @@ class AntAdapterManager:
                     for key, value in states.items()
                 }
 
+        # Migrate Capture state written by older integration versions.
+        #
+        # Capture state used to live as "capture_enabled" inside each
+        # known_adapters record. New versions intentionally store live/user
+        # Capture preferences separately in antplus.capture_states so changing
+        # the switch does not update/reload the config entry.
+        #
+        # Existing Store values always win. The legacy value is only used when
+        # this physical adapter has never yet been written to the new Store.
+        migrated_capture_state = False
+
+        for stable_key, data in self._known_adapters().items():
+            if (
+                stable_key not in self._stored_capture_states
+                and "capture_enabled" in data
+            ):
+                self._stored_capture_states[stable_key] = bool(
+                    data["capture_enabled"]
+                )
+                migrated_capture_state = True
+                _LOGGER.info(
+                    "Migrated persisted Capture state for ANT USB adapter %s: %s",
+                    stable_key,
+                    "ON" if self._stored_capture_states[stable_key] else "OFF",
+                )
+
+        if migrated_capture_state:
+            await self._async_save_capture_states()
+
         for data in self._known_adapters().values():
             try:
                 adapter = AntUsbAdapter.from_mapping(data)
