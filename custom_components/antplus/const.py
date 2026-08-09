@@ -1,7 +1,7 @@
 """Constants for the ANT+ integration."""
 
 DOMAIN = "antplus"
-PLATFORMS = ["sensor", "switch"]
+PLATFORMS = ["sensor", "switch", "button"]
 
 ANTPLUS_NETWORK_NUMBER = 0
 ANTPLUS_RF_FREQUENCY = 57
@@ -16,6 +16,8 @@ REMOTE_ADAPTER_CAPTURE_STATE_EVENT = "antplus_adapter_capture_state"
 REMOTE_GATEWAY_STATUS_EVENT = "antplus_gateway_status"
 REMOTE_CAPTURE_STATE_EVENT = "antplus_capture_state"
 
+DEVICE_TYPE_SYNC = 1
+DEVICE_TYPE_MULTI_SPORT_SPEED_DISTANCE = 15
 DEVICE_TYPE_POWER = 11
 DEVICE_TYPE_CONTROLS = 16
 DEVICE_TYPE_FITNESS_EQUIPMENT = 17
@@ -23,11 +25,16 @@ DEVICE_TYPE_BLOOD_PRESSURE = 18
 DEVICE_TYPE_GEOCACHE = 19
 DEVICE_TYPE_LEV = 20
 DEVICE_TYPE_ENVIRONMENT = 25
+DEVICE_TYPE_RACQUET = 26
+DEVICE_TYPE_RUNNING_DYNAMICS = 30
+DEVICE_TYPE_MUSCLE_OXYGEN = 31
 DEVICE_TYPE_SHIFTING = 34
 DEVICE_TYPE_BICYCLE_LIGHTS = 35
 DEVICE_TYPE_RADAR = 40
+DEVICE_TYPE_TRACKER = 41
 DEVICE_TYPE_TIRE_PRESSURE = 48
 DEVICE_TYPE_DROPPER = 115
+DEVICE_TYPE_SUSPENSION = 116
 DEVICE_TYPE_WEIGHT_SCALE = 119
 DEVICE_TYPE_HEART_RATE = 120
 DEVICE_TYPE_BIKE_SPEED_CADENCE = 121
@@ -37,18 +44,25 @@ DEVICE_TYPE_STRIDE_SPEED = 124
 DEVICE_TYPE_CORE_TEMP = 127
 
 DEVICE_TYPE_NAMES = {
+    1: "Sync",
     11: "Power Meter",
+    15: "Multi-Sport Speed/Distance",
     16: "Controls Device",
     17: "Fitness Equipment",
     18: "Blood Pressure",
     19: "Geocache",
     20: "Light Electric Vehicle",
     25: "Environment",
+    26: "Racquet",
+    30: "Running Dynamics",
+    31: "Muscle Oxygen",
     34: "Shifting",
     35: "Bicycle Lights",
     40: "Radar",
+    41: "Tracker",
     48: "Tire Pressure Monitor",
     115: "Dropper Seatpost",
+    116: "Suspension",
     119: "Weight Scale",
     120: "Heart Rate",
     121: "Bike Speed/Cadence",
