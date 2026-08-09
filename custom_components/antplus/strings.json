@@ -4,11 +4,11 @@
     "step": {
       "user": {
         "title": "Set up HA ANT+",
-        "description": "Set up the ANT+ USB adapter connected to this Home Assistant host."
+        "description": "Set up HA ANT+. Local ANT+ USB adapters and remote ANT+ gateways are detected and used automatically."
       },
       "usb_confirm": {
         "title": "ANT+ USB adapter discovered",
-        "description": "Set up {name}?"
+        "description": "Set up HA ANT+ with the discovered adapter {name}? Remote ANT+ gateways will also be accepted automatically."
       }
     },
     "error": {

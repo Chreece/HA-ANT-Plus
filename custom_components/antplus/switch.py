@@ -1,4 +1,4 @@
-"""Switch platform for ANT+ capture control."""
+"""Switch platform for global HA ANT+ capture."""
 
 from __future__ import annotations
 
@@ -17,12 +17,17 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
+    """Set up the global HA ANT+ capture switch."""
     receiver: AntPlusReceiver = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities([AntPlusCaptureSwitch(receiver)])
+
+    async_add_entities(
+        [AntPlusCaptureSwitch(receiver)],
+        update_before_add=False,
+    )
 
 
 class AntPlusCaptureSwitch(SwitchEntity):
-    """Start or stop ANT+ continuous capture."""
+    """Enable or disable ANT+ capture from every source."""
 
     _attr_name = "Capture"
     _attr_unique_id = "antplus_capture"
@@ -33,41 +38,64 @@ class AntPlusCaptureSwitch(SwitchEntity):
 
     @property
     def is_on(self) -> bool:
-        return self.receiver.running
+        """Return the global capture state."""
+        return self.receiver.capture_enabled
 
     @property
     def available(self) -> bool:
-        # The control itself must stay usable while stopped or errored.
+        """The global control is always available."""
         return True
 
     @property
     def extra_state_attributes(self):
+        """Expose transport diagnostics."""
+        sources = set()
+
+        for device in self.receiver.snapshot().values():
+            sources.update(
+                device.decoder_state.get("sources", set())
+            )
+
         return {
-            "status": self.receiver.state,
-            "last_error": self.receiver.error,
+            "local_receiver_status": self.receiver.state,
+            "local_receiver_error": self.receiver.error,
+            "sources_seen": sorted(sources),
+            "remote_capture_enabled": self.receiver.capture_enabled,
         }
 
     @property
     def device_info(self) -> DeviceInfo:
+        """Represent the global HA ANT+ hub."""
         return DeviceInfo(
-            identifiers={(DOMAIN, "usb_adapter")},
-            name="ANT+ USB Adapter",
-            manufacturer="Dynastream / Garmin",
-            model="ANT+ USB Adapter",
+            identifiers={(DOMAIN, "hub")},
+            name="HA ANT+",
+            manufacturer="HA ANT+",
+            model="ANT+ Hub",
         )
 
     async def async_turn_on(self, **kwargs) -> None:
-        await self.hass.async_add_executor_job(self.receiver.start)
+        """Enable capture from local and remote ANT+ adapters."""
+        await self.hass.async_add_executor_job(
+            self.receiver.enable_capture
+        )
         self.async_write_ha_state()
 
     async def async_turn_off(self, **kwargs) -> None:
-        await self.hass.async_add_executor_job(self.receiver.stop)
+        """Disable capture from local and remote ANT+ adapters."""
+        await self.hass.async_add_executor_job(
+            self.receiver.disable_capture
+        )
         self.async_write_ha_state()
 
     async def async_added_to_hass(self) -> None:
+        """Register receiver state updates."""
         await super().async_added_to_hass()
 
         def changed() -> None:
-            self.hass.loop.call_soon_threadsafe(self.async_write_ha_state)
+            self.hass.loop.call_soon_threadsafe(
+                self.async_write_ha_state
+            )
 
-        self.async_on_remove(self.receiver.add_state_callback(changed))
+        self.async_on_remove(
+            self.receiver.add_state_callback(changed)
+        )

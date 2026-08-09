@@ -168,9 +168,9 @@ class AntPlusSensor(AntPlusEntity, SensorEntity):
 
 
 class AntPlusCaptureStatusSensor(SensorEntity):
-    """Diagnostic capture status for the ANT+ USB adapter."""
+    """Diagnostic status of the local ANT+ transport."""
 
-    _attr_name = "Capture Status"
+    _attr_name = "Local USB Status"
     _attr_unique_id = "antplus_capture_status"
     _attr_icon = "mdi:access-point-network"
     _attr_entity_category = EntityCategory.DIAGNOSTIC
@@ -186,10 +186,10 @@ class AntPlusCaptureStatusSensor(SensorEntity):
     def device_info(self):
         from homeassistant.helpers.entity import DeviceInfo
         return DeviceInfo(
-            identifiers={(DOMAIN, "usb_adapter")},
-            name="ANT+ USB Adapter",
-            manufacturer="Dynastream / Garmin",
-            model="ANT+ USB Adapter",
+            identifiers={(DOMAIN, "hub")},
+            name="HA ANT+",
+            manufacturer="HA ANT+",
+            model="ANT+ Hub",
         )
 
     async def async_added_to_hass(self) -> None:
@@ -204,7 +204,7 @@ class AntPlusCaptureStatusSensor(SensorEntity):
 class AntPlusCaptureErrorSensor(SensorEntity):
     """Last ANT+ receiver error."""
 
-    _attr_name = "Last Error"
+    _attr_name = "Local USB Error"
     _attr_unique_id = "antplus_capture_last_error"
     _attr_icon = "mdi:alert-circle-outline"
     _attr_entity_category = EntityCategory.DIAGNOSTIC
@@ -221,10 +221,10 @@ class AntPlusCaptureErrorSensor(SensorEntity):
     def device_info(self):
         from homeassistant.helpers.entity import DeviceInfo
         return DeviceInfo(
-            identifiers={(DOMAIN, "usb_adapter")},
-            name="ANT+ USB Adapter",
-            manufacturer="Dynastream / Garmin",
-            model="ANT+ USB Adapter",
+            identifiers={(DOMAIN, "hub")},
+            name="HA ANT+",
+            manufacturer="HA ANT+",
+            model="ANT+ Hub",
         )
 
     async def async_added_to_hass(self) -> None:
@@ -275,8 +275,8 @@ class AntPlusDecoderCoverageSensor(SensorEntity):
     def device_info(self):
         from homeassistant.helpers.entity import DeviceInfo
         return DeviceInfo(
-            identifiers={(DOMAIN, "usb_adapter")},
-            name="ANT+ USB Adapter",
-            manufacturer="Dynastream / Garmin",
-            model="ANT+ USB Adapter",
+            identifiers={(DOMAIN, "hub")},
+            name="HA ANT+",
+            manufacturer="HA ANT+",
+            model="ANT+ Hub",
         )

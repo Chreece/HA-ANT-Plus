@@ -41,9 +41,9 @@ class AntPlusEntity(Entity):
 
     @property
     def available(self) -> bool:
-        if not self.receiver.running:
-            return False
-
+        # Entity availability is based on packet freshness, not on whether
+        # the local USB receiver is running. Remote gateways can continue
+        # updating the same ANT device while local capture is stopped.
         metric = self.ant_device.metrics.get(self.metric_key)
         if metric is None:
             return False
@@ -108,6 +108,9 @@ class AntPlusEntity(Entity):
                 for profile in sorted(dev.profiles)
             ],
             "transmission_types": sorted(dev.transmission_types),
+            "sources": sorted(
+                dev.decoder_state.get("sources", set())
+            ),
             "manufacturer_id": dev.manufacturer_id,
             "model_number": dev.model_no,
             "last_seen": dev.last_seen.isoformat() if dev.last_seen else None,

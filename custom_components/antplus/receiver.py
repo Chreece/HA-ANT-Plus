@@ -45,9 +45,26 @@ class AntPlusReceiver:
         self.error: str | None = None
         self._state = "stopped"
 
+        # Global HA ANT+ capture state.
+        #
+        # True:
+        #   - local ANT USB reception is enabled
+        #   - remote ANT+ packets are accepted
+        #
+        # False:
+        #   - local ANT USB reception is stopped
+        #   - remote ANT+ packets are discarded
+        self._capture_enabled = True
+
     @property
     def running(self) -> bool:
+        """Return whether the local ANT USB receiver is running."""
         return self._state == "running"
+
+    @property
+    def capture_enabled(self) -> bool:
+        """Return the global HA ANT+ capture state."""
+        return self._capture_enabled
 
     @property
     def state(self) -> str:
@@ -88,9 +105,50 @@ class AntPlusReceiver:
             except Exception:
                 _LOGGER.debug("ANT+ state callback failed", exc_info=True)
 
-    def start(self) -> None:
-        """Start capture and wait briefly until it is running or has failed."""
+    def enable_capture(self) -> None:
+        """Enable capture from all ANT+ sources."""
         with self._control_lock:
+            changed = not self._capture_enabled
+            self._capture_enabled = True
+
+        if changed:
+            for callback in tuple(self._state_callbacks):
+                try:
+                    callback()
+                except Exception:
+                    _LOGGER.debug(
+                        "ANT+ state callback failed",
+                        exc_info=True,
+                    )
+
+        # Also start the optional local adapter.
+        self.start(wait=False)
+
+    def disable_capture(self) -> None:
+        """Disable capture from all ANT+ sources."""
+        with self._control_lock:
+            changed = self._capture_enabled
+            self._capture_enabled = False
+
+        # Stop the local USB receiver.
+        self.stop()
+
+        if changed:
+            for callback in tuple(self._state_callbacks):
+                try:
+                    callback()
+                except Exception:
+                    _LOGGER.debug(
+                        "ANT+ state callback failed",
+                        exc_info=True,
+                    )
+
+    def start(self, wait: bool = True) -> None:
+        """Start the optional local ANT USB receiver."""
+        with self._control_lock:
+            if not self._capture_enabled:
+                return
+
             if self._state in ("starting", "running"):
                 return
 
@@ -108,9 +166,9 @@ class AntPlusReceiver:
             )
             self._thread.start()
 
-        # Give the caller a deterministic result instead of returning before
-        # the USB stick has actually opened.
-        self._started_event.wait(timeout=5)
+        if wait:
+            # Give interactive callers a deterministic result.
+            self._started_event.wait(timeout=5)
 
     def stop(self) -> None:
         """Stop capture and wait for the receiver thread to terminate."""
@@ -199,6 +257,7 @@ class AntPlusReceiver:
                 self._set_state("stopped")
 
     def _on_data(self, data: Any) -> None:
+        """Receive one packet from the local ANT USB adapter."""
         if len(data) < 13:
             return
 
@@ -207,11 +266,55 @@ class AntPlusReceiver:
         device_type = int(data[11])
         transmission_type = int(data[12])
 
+        self.process_packet(
+            device_id=device_id,
+            device_type=device_type,
+            transmission_type=transmission_type,
+            payload=payload,
+            source="local",
+        )
+
+    def process_packet(
+        self,
+        device_id: int,
+        device_type: int,
+        transmission_type: int,
+        payload: bytes,
+        *,
+        source: str = "unknown",
+    ) -> None:
+        """Process one ANT+ packet from any transport.
+
+        ANT device ID is the canonical identity. If the same ANT ID is seen
+        through local USB and/or multiple remote gateways, all packets update
+        the same AntDevice instance.
+        """
+        # One global Capture switch controls every ANT+ source.
+        if not self._capture_enabled:
+            return
+
+        if not 0 <= device_id <= 0xFFFF:
+            raise ValueError(f"Invalid ANT device ID: {device_id}")
+
+        if not 0 <= device_type <= 0xFF:
+            raise ValueError(f"Invalid ANT device type: {device_type}")
+
+        if not 0 <= transmission_type <= 0xFF:
+            raise ValueError(
+                f"Invalid ANT transmission type: {transmission_type}"
+            )
+
+        if len(payload) != 8:
+            raise ValueError(
+                f"ANT payload must contain exactly 8 bytes, got {len(payload)}"
+            )
+
         new_device = False
         new_profile = False
         metadata_changed = False
 
         with self._lock:
+            # Deliberately keyed ONLY by ANT device ID.
             device = self.devices.get(device_id)
             if device is None:
                 device = AntDevice(device_id=device_id)
@@ -225,6 +328,11 @@ class AntPlusReceiver:
             device.transmission_types.add(transmission_type)
             device.last_seen = datetime.now(timezone.utc)
 
+            # Keep source information diagnostic-only. It does not participate
+            # in device identity.
+            sources = device.decoder_state.setdefault("sources", set())
+            sources.add(source)
+
             before_metadata = (
                 device.manufacturer_id,
                 device.manufacturer_name,
@@ -233,7 +341,9 @@ class AntPlusReceiver:
                 device.serial_no,
                 device.software_ver,
             )
+
             self._decode_metadata(device, device_type, payload)
+
             after_metadata = (
                 device.manufacturer_id,
                 device.manufacturer_name,
@@ -242,32 +352,53 @@ class AntPlusReceiver:
                 device.serial_no,
                 device.software_ver,
             )
+
             metadata_changed = before_metadata != after_metadata
 
             changed_metrics: list[str] = []
+
             for metric in decode_packet(device, device_type, payload):
                 old = device.metrics.get(metric.key)
                 device.metrics[metric.key] = metric
+
                 if old != metric:
                     changed_metrics.append(metric.key)
 
         if new_device:
-            _LOGGER.info("Discovered ANT+ device %s", device_id)
+            _LOGGER.info(
+                "Discovered ANT+ device %s via %s",
+                device_id,
+                source,
+            )
+
         if new_profile:
             _LOGGER.info(
-                "ANT+ device %s exposed profile %s (%s)",
+                "ANT+ device %s exposed profile %s (%s) via %s",
                 device_id,
                 device_type,
                 DEVICE_TYPE_NAMES.get(device_type, "Unknown"),
+                source,
             )
 
         if new_device or new_profile or metadata_changed:
             for callback in tuple(self._device_callbacks):
-                callback(device)
+                try:
+                    callback(device)
+                except Exception:
+                    _LOGGER.debug(
+                        "ANT+ device callback failed",
+                        exc_info=True,
+                    )
 
         for key in changed_metrics:
             for callback in tuple(self._metric_callbacks):
-                callback(device, key)
+                try:
+                    callback(device, key)
+                except Exception:
+                    _LOGGER.debug(
+                        "ANT+ metric callback failed",
+                        exc_info=True,
+                    )
 
     def _decode_metadata(
         self, device: AntDevice, device_type: int, data: bytes
