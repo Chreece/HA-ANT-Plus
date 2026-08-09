@@ -54,6 +54,8 @@ class AntUsbAdapter:
     manufacturer: str | None = None
     product: str | None = None
     path: str | None = None
+    bus: int | None = None
+    address: int | None = None
     source: str | None = None
     gateway_id: str | None = None
 
@@ -115,6 +117,8 @@ class AntUsbAdapter:
             manufacturer=data.get("manufacturer"),
             product=data.get("product"),
             path=data.get("path"),
+            bus=int(data["bus"]) if data.get("bus") is not None else None,
+            address=int(data["address"]) if data.get("address") is not None else None,
             source=data.get("source"),
             gateway_id=data.get("gateway_id"),
         )
@@ -189,6 +193,8 @@ def scan_linux_ant_adapters() -> list[AntUsbAdapter]:
                 manufacturer=read_optional("manufacturer"),
                 product=read_optional("product"),
                 path=str(device_path),
+                bus=int(read_optional("busnum") or 0) or None,
+                address=int(read_optional("devnum") or 0) or None,
                 source="local",
             )
         )
@@ -251,10 +257,15 @@ class LocalAdapterScanner:
 
     def _run(self) -> None:
         try:
+            if self.adapter.bus is None or self.adapter.address is None:
+                raise RuntimeError(
+                    f"USB bus/address unavailable for {self.adapter.stable_key}"
+                )
+
             node = create_selected_node(
-                self.adapter.vid,
                 self.adapter.pid,
-                self.adapter.serial,
+                self.adapter.bus,
+                self.adapter.address,
             )
             self._node = node
             node.set_network_key(

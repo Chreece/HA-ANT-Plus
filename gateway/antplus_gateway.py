@@ -86,24 +86,14 @@ def websocket_url(ha_url: str) -> str:
     return f"{scheme}://{parsed.netloc}{parsed.path.rstrip('/')}/api/websocket"
 
 
-def _usb_serial(device) -> str | None:
-    try:
-        if not device.iSerialNumber:
-            return None
-        value = usb.util.get_string(device, device.iSerialNumber)
-    except Exception:
-        return None
-    if value is None:
-        return None
-    return str(value).rstrip("\x00").strip() or None
-
-
-class _SerialSelectedMixin:
-    TARGET_SERIAL: str | None = None
+class _PhysicalSelectedMixin:
+    TARGET_BUS: int | None = None
+    TARGET_ADDRESS: int | None = None
 
     def open(self) -> None:
         original_find = driver_module.usb.core.find
-        serial = self.TARGET_SERIAL
+        target_bus = self.TARGET_BUS
+        target_address = self.TARGET_ADDRESS
 
         def selected_find(*args, **kwargs):
             devices = original_find(
@@ -113,9 +103,14 @@ class _SerialSelectedMixin:
             )
             if devices is None:
                 return None
+
             for device in devices:
-                if serial is None or _usb_serial(device) == serial:
+                if (
+                    getattr(device, "bus", None) == target_bus
+                    and getattr(device, "address", None) == target_address
+                ):
                     return device
+
             return None
 
         driver_module.usb.core.find = selected_find
@@ -125,21 +120,32 @@ class _SerialSelectedMixin:
             driver_module.usb.core.find = original_find
 
 
-class SerialUSB2Driver(_SerialSelectedMixin, USB2Driver):
+class PhysicalUSB2Driver(_PhysicalSelectedMixin, USB2Driver):
     pass
 
 
-class SerialUSB3Driver(_SerialSelectedMixin, USB3Driver):
+class PhysicalUSB3Driver(_PhysicalSelectedMixin, USB3Driver):
     pass
 
 
 @contextmanager
-def _selected_driver(pid: str, serial: str | None):
+def _selected_driver(
+    pid: str,
+    bus: int,
+    address: int,
+):
     pid_int = int(pid, 16)
-    driver_cls = SerialUSB2Driver if pid_int == USB2Driver.ID_PRODUCT else SerialUSB3Driver
+
+    if pid_int == USB2Driver.ID_PRODUCT:
+        driver_cls = PhysicalUSB2Driver
+    elif pid_int == USB3Driver.ID_PRODUCT:
+        driver_cls = PhysicalUSB3Driver
+    else:
+        raise ValueError(f"Unsupported ANT USB product id {pid}")
 
     class SelectedDriver(driver_cls):
-        TARGET_SERIAL = serial
+        TARGET_BUS = bus
+        TARGET_ADDRESS = address
 
     original = ant_module.find_driver
     ant_module.find_driver = lambda: SelectedDriver()
@@ -149,9 +155,13 @@ def _selected_driver(pid: str, serial: str | None):
         ant_module.find_driver = original
 
 
-def create_selected_node(pid: str, serial: str | None) -> Node:
+def create_selected_node(
+    pid: str,
+    bus: int,
+    address: int,
+) -> Node:
     with _NODE_CREATE_LOCK:
-        with _selected_driver(pid, serial):
+        with _selected_driver(pid, bus, address):
             return Node()
 
 
@@ -185,6 +195,8 @@ def detect_ant_adapters() -> list[dict[str, Any]]:
                 "manufacturer": read_optional("manufacturer"),
                 "product": read_optional("product"),
                 "path": str(device_path),
+                "bus": int(read_optional("busnum") or 0) or None,
+                "address": int(read_optional("devnum") or 0) or None,
             }
         )
     return result
@@ -254,9 +266,17 @@ class AntScanner:
 
     def _run(self) -> None:
         try:
+            bus = self.adapter.get("bus")
+            address = self.adapter.get("address")
+            if bus is None or address is None:
+                raise RuntimeError(
+                    f"USB bus/address unavailable for {self.adapter_id}"
+                )
+
             node = create_selected_node(
                 self.adapter["pid"],
-                self.adapter.get("serial"),
+                int(bus),
+                int(address),
             )
             self._node = node
             node.set_network_key(ANTPLUS_NETWORK_NUMBER, ANTPLUS_NETWORK_KEY)
