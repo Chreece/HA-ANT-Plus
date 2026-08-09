@@ -17,6 +17,7 @@ from .adapter_sensor import async_setup_adapter_sensors
 from .const import (
     DEFAULT_INACTIVITY_TIMEOUT,
     DOMAIN,
+    SENSORS_PARENT_IDENTIFIER,
     device_display_name,
     device_model_name,
 )

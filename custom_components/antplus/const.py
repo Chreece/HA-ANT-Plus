@@ -1,6 +1,7 @@
 """Constants for the ANT+ integration."""
 
 DOMAIN = "antplus"
+SENSORS_PARENT_IDENTIFIER = (DOMAIN, "sensors")
 PLATFORMS = ["sensor", "switch", "button"]
 
 ANTPLUS_NETWORK_NUMBER = 0

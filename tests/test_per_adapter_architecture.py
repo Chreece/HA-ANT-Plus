@@ -40,12 +40,12 @@ def test_same_ant_sensor_merges_across_multiple_usb_adapters():
     assert f"remote:Bedroom:{adapter_b}" in sources
 
 
-def test_cleanup_is_one_button_per_adapter():
+def test_cleanup_no_longer_lives_on_usb_adapters():
     source = Path("custom_components/antplus/button.py").read_text()
-    assert "for stable_key in manager.records:" in source
-    assert "AntUsbAdapterCleanupStaleDevicesButton" in source
-    assert 'f"antplus_usb_adapter_{stable_key}_cleanup_stale_devices"' in source
-    assert '"scope": "all_ant_sensors"' in source
+
+    assert "AntUsbAdapterCleanupStaleDevicesButton" not in source
+    assert 'name="ANT+ Sensors"' in source
+    assert "SENSORS_PARENT_IDENTIFIER" in source
 
 
 def test_adapter_diagnostics_live_on_physical_adapter():

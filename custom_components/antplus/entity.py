@@ -11,6 +11,7 @@ from .const import (
     DEVICE_INACTIVITY_TIMEOUT,
     DEVICE_TYPE_NAMES,
     DOMAIN,
+    SENSORS_PARENT_IDENTIFIER,
     device_display_name,
     device_model_name,
 )
@@ -71,6 +72,7 @@ class AntPlusEntity(Entity):
         info = {
             "identifiers": {(DOMAIN, str(dev.device_id))},
             "name": device_display_name(dev),
+            "via_device": SENSORS_PARENT_IDENTIFIER,
         }
 
         # Only supply positively learned metadata. Omitting unknown fields is
