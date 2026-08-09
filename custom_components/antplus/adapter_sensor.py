@@ -38,6 +38,7 @@ async def async_setup_adapter_sensors(
                 AntUsbAdapterDecoderCoverageSensor(manager, stable_key),
             ],
             update_before_add=False,
+            config_subentry_id=subentry_id,
         )
 
     for stable_key in manager.records:

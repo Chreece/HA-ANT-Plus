@@ -98,6 +98,7 @@ async def async_setup_entry(
     async_add_entities(
         [AntPlusCleanupStaleDevicesButton(hass, entry, receiver)],
         update_before_add=False,
+        config_subentry_id=sensors_subentry_id,
     )
 
 

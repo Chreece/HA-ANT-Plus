@@ -56,6 +56,7 @@ async def async_setup_entry(
         async_add_entities(
             [AntPlusSensor(receiver, device, metric_key, timeout)],
             update_before_add=False,
+            config_subentry_id=sensors_subentry_id,
         )
 
     def metric_changed(device: AntDevice, metric_key: str) -> None:

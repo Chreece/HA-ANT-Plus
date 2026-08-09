@@ -135,6 +135,13 @@ async def async_cleanup_legacy_entities(
     if hub is not None:
         device_registry.async_remove_device(hub.id)
 
+    obsolete_sensors_parent = device_registry.async_get_device_by_identifier(
+        (DOMAIN, "sensors"),
+        entry.entry_id,
+    )
+    if obsolete_sensors_parent is not None:
+        device_registry.async_remove_device(obsolete_sensors_parent.id)
+
 
     integration_device = device_registry.async_get_device_by_identifier(
         (DOMAIN, "integration"),
