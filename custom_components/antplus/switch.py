@@ -67,7 +67,7 @@ class AntUsbAdapterCaptureSwitch(SwitchEntity):
     @property
     def is_on(self) -> bool:
         record = self._record
-        return bool(record and record.capture_enabled)
+        return bool(record and record.displayed_capture)
 
     @property
     def extra_state_attributes(self):
@@ -81,6 +81,7 @@ class AntUsbAdapterCaptureSwitch(SwitchEntity):
             "remote_gateways": sorted(record.remote_gateways or {}),
             "desired_capture": record.desired_capture,
             "confirmed_capture": record.capture_enabled,
+            "pending_capture": record.pending_capture,
             "capture_error": record.capture_error,
         }
 

@@ -46,6 +46,10 @@ REMOTE_EXPIRE_SECONDS = 45.0
 LOCAL_MISSING_GRACE_SECONDS = 15.0
 REMOTE_ADAPTER_MISSING_GRACE_SECONDS = 20.0
 
+# How long HA keeps showing the requested Capture state while waiting
+# for the physical adapter/gateway to confirm what actually happened.
+CAPTURE_CONFIRM_TIMEOUT_SECONDS = 15.0
+
 AdapterCallback = Callable[[str], None]
 
 
@@ -141,6 +145,11 @@ class AdapterPresence:
     remote_capture_states: dict[str, bool] | None = None
     capture_error: str | None = None
 
+    # Transient optimistic UI state. This exists only while HA is waiting
+    # for the physical adapter to confirm the requested Capture state.
+    pending_capture: bool | None = None
+    pending_capture_since: float | None = None
+
     def __post_init__(self) -> None:
         if self.remote_gateways is None:
             self.remote_gateways = {}
@@ -154,6 +163,17 @@ class AdapterPresence:
         return self.local_capture_enabled or any(
             (self.remote_capture_states or {}).values()
         )
+
+    @property
+    def displayed_capture(self) -> bool:
+        """State exposed by the HA switch.
+
+        While a command is awaiting physical confirmation, expose the
+        requested state. Otherwise expose the confirmed physical state.
+        """
+        if self.pending_capture is not None:
+            return self.pending_capture
+        return self.capture_enabled
 
     @property
     def available(self) -> bool:
@@ -545,6 +565,62 @@ class AntAdapterManager:
 
     async def _async_expire_tick(self, _now) -> None:
         self.expire_remote_gateways()
+        self.expire_pending_capture_commands()
+
+    def expire_pending_capture_commands(self) -> None:
+        """Drop optimistic UI state when physical confirmation never arrives."""
+        now = time.monotonic()
+
+        for stable_key, record in self._records.items():
+            if (
+                record.pending_capture is None
+                or record.pending_capture_since is None
+            ):
+                continue
+
+            if (
+                now - record.pending_capture_since
+                < CAPTURE_CONFIRM_TIMEOUT_SECONDS
+            ):
+                continue
+
+            _LOGGER.warning(
+                "Timed out waiting for Capture %s confirmation from ANT USB "
+                "adapter %s; reverting switch to confirmed physical state %s",
+                "ON" if record.pending_capture else "OFF",
+                stable_key,
+                "ON" if record.capture_enabled else "OFF",
+            )
+
+            record.pending_capture = None
+            record.pending_capture_since = None
+            self._notify(stable_key)
+
+    def _confirm_capture_state(
+        self,
+        stable_key: str,
+        enabled: bool,
+    ) -> None:
+        """Resolve a pending command from a physical-state report."""
+        record = self._records.get(stable_key)
+        if record is None or record.pending_capture is None:
+            return
+
+        requested = record.pending_capture
+
+        # Any authoritative state report resolves the pending operation.
+        # If it matches, the optimistic state simply becomes confirmed.
+        # If it differs, the switch falls back to the physical state.
+        record.pending_capture = None
+        record.pending_capture_since = None
+
+        _LOGGER.debug(
+            "Capture confirmation for ANT USB adapter %s: "
+            "requested=%s confirmed=%s",
+            stable_key,
+            requested,
+            bool(enabled),
+        )
 
     def _sync_local_capture(self, stable_key: str) -> None:
         record = self._records.get(stable_key)
@@ -585,12 +661,18 @@ class AntAdapterManager:
         if record is None:
             return
         previous = record.local_capture_enabled
+        had_pending = record.pending_capture is not None
+
         record.local_capture_enabled = bool(enabled)
+
         if error:
             record.capture_error = error
         elif enabled:
             record.capture_error = None
-        if previous != bool(enabled) or error:
+
+        self._confirm_capture_state(stable_key, bool(enabled))
+
+        if previous != bool(enabled) or error or had_pending:
             self._notify(stable_key)
 
     def update_remote_capture_state(
@@ -606,12 +688,18 @@ class AntAdapterManager:
         if gateway_id not in (record.remote_gateways or {}):
             return
         previous = record.remote_capture_states.get(gateway_id, False)
+        had_pending = record.pending_capture is not None
+
         record.remote_capture_states[gateway_id] = bool(enabled)
+
         if error:
             record.capture_error = error
         elif enabled:
             record.capture_error = None
-        if previous != bool(enabled) or error:
+
+        self._confirm_capture_state(stable_key, bool(enabled))
+
+        if previous != bool(enabled) or error or had_pending:
             self._notify(stable_key)
 
     async def _async_save_capture_states(self) -> None:
@@ -639,9 +727,21 @@ class AntAdapterManager:
         if record is None:
             return
 
-        record.desired_capture = bool(enabled)
-        self._stored_capture_states[stable_key] = record.desired_capture
+        requested = bool(enabled)
+
+        # Persist what HA wants across restarts.
+        record.desired_capture = requested
+        self._stored_capture_states[stable_key] = requested
         await self._async_save_capture_states()
+
+        # Optimistically expose the requested state while waiting for the
+        # actual physical adapter to confirm it.
+        record.pending_capture = requested
+        record.pending_capture_since = time.monotonic()
+        record.capture_error = None
+
+        # Notify before dispatch so the switch moves immediately.
+        self._notify(stable_key)
 
         self._sync_local_capture(stable_key)
 
@@ -649,10 +749,8 @@ class AntAdapterManager:
             self._send_remote_capture(
                 stable_key,
                 gateway_id,
-                record.desired_capture,
+                requested,
             )
-
-        self._notify(stable_key)
 
     async def async_refresh_local(self) -> None:
         adapters = await self.hass.async_add_executor_job(

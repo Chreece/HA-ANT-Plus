@@ -44,6 +44,8 @@ SUPPORTED_USB_IDS = {
 
 USB_RESCAN_INTERVAL = 5.0
 HEARTBEAT_INTERVAL = 15.0
+CAPTURE_START_ATTEMPTS = 3
+CAPTURE_RETRY_DELAY = 2.0
 
 _LOGGER = logging.getLogger("ha_antplus_gateway")
 _NODE_CREATE_LOCK = threading.Lock()
@@ -230,6 +232,16 @@ class AntScanner:
     def enabled(self) -> bool:
         return self._enabled
 
+    @property
+    def running(self) -> bool:
+        thread = self._thread
+        return bool(
+            self._enabled
+            and thread is not None
+            and thread.is_alive()
+            and self._node is not None
+        )
+
     def start(self) -> None:
         with self._lock:
             self._enabled = True
@@ -251,6 +263,22 @@ class AntScanner:
                 node.stop()
             except Exception:
                 _LOGGER.debug("Error stopping ANT node", exc_info=True)
+
+    def _refresh_runtime_adapter(self) -> None:
+        """Refresh bus/address without changing physical adapter identity."""
+        for candidate in detect_ant_adapters():
+            try:
+                candidate_id = stable_key(candidate)
+            except ValueError:
+                continue
+
+            if candidate_id == self.adapter_id:
+                self.adapter = candidate
+                return
+
+        raise RuntimeError(
+            f"Physical ANT USB adapter {self.adapter_id} is not currently present"
+        )
 
     def _report_state(
         self,
@@ -284,45 +312,128 @@ class AntScanner:
             _LOGGER.warning("Packet queue full; dropping ANT packet")
 
     def _run(self) -> None:
+        last_error: Exception | None = None
+
         try:
-            bus = self.adapter.get("bus")
-            address = self.adapter.get("address")
-            if bus is None or address is None:
-                raise RuntimeError(
-                    f"USB bus/address unavailable for {self.adapter_id}"
-                )
+            for attempt in range(1, CAPTURE_START_ATTEMPTS + 1):
+                if not self._enabled:
+                    return
 
-            node = create_selected_node(
-                self.adapter["pid"],
-                int(bus),
-                int(address),
+                node = None
+
+                try:
+                    self._refresh_runtime_adapter()
+
+                    bus = self.adapter.get("bus")
+                    address = self.adapter.get("address")
+                    if bus is None or address is None:
+                        raise RuntimeError(
+                            f"USB bus/address unavailable for {self.adapter_id}"
+                        )
+
+                    _LOGGER.info(
+                        "Starting capture on %s (attempt %d/%d, bus=%s address=%s)",
+                        self.adapter_id,
+                        attempt,
+                        CAPTURE_START_ATTEMPTS,
+                        bus,
+                        address,
+                    )
+
+                    node = create_selected_node(
+                        self.adapter["pid"],
+                        int(bus),
+                        int(address),
+                    )
+                    self._node = node
+
+                    node.set_network_key(
+                        ANTPLUS_NETWORK_NUMBER,
+                        ANTPLUS_NETWORK_KEY,
+                    )
+
+                    channel = node.new_channel(
+                        Channel.Type.BIDIRECTIONAL_RECEIVE,
+                        ANTPLUS_NETWORK_NUMBER,
+                        0x01,
+                    )
+                    channel.on_broadcast_data = self._on_data
+                    channel.on_burst_data = self._on_data
+                    channel.on_acknowledge = self._on_data
+                    channel.set_id(0, 0, 0)
+                    channel.enable_extended_messages(1)
+                    channel.set_rf_freq(ANTPLUS_RF_FREQUENCY)
+                    channel.open_rx_scan_mode()
+
+                    if not self._enabled:
+                        try:
+                            node.stop()
+                        except Exception:
+                            pass
+                        return
+
+                    _LOGGER.info(
+                        "Capture started on adapter %s",
+                        self.adapter_id,
+                    )
+                    self._report_state(True)
+
+                    node.start()
+                    return
+
+                except Exception as err:
+                    last_error = err
+                    self._node = None
+
+                    if node is not None:
+                        try:
+                            node.stop()
+                        except Exception:
+                            _LOGGER.debug(
+                                "Error closing failed ANT node for %s",
+                                self.adapter_id,
+                                exc_info=True,
+                            )
+
+                    if not self._enabled:
+                        return
+
+                    if attempt < CAPTURE_START_ATTEMPTS:
+                        _LOGGER.warning(
+                            "Capture handshake failed on %s (attempt %d/%d): %s; "
+                            "retrying in %.1fs",
+                            self.adapter_id,
+                            attempt,
+                            CAPTURE_START_ATTEMPTS,
+                            err,
+                            CAPTURE_RETRY_DELAY,
+                        )
+                        time.sleep(CAPTURE_RETRY_DELAY)
+                        continue
+
+                    _LOGGER.error(
+                        "Capture failed on adapter %s after %d attempts: %s",
+                        self.adapter_id,
+                        CAPTURE_START_ATTEMPTS,
+                        err,
+                    )
+
+            self._enabled = False
+            self._report_state(
+                False,
+                str(last_error) if last_error is not None else "Capture failed",
             )
-            self._node = node
-            node.set_network_key(ANTPLUS_NETWORK_NUMBER, ANTPLUS_NETWORK_KEY)
 
-            channel = node.new_channel(
-                Channel.Type.BIDIRECTIONAL_RECEIVE,
-                ANTPLUS_NETWORK_NUMBER,
-                0x01,
-            )
-            channel.on_broadcast_data = self._on_data
-            channel.on_burst_data = self._on_data
-            channel.on_acknowledge = self._on_data
-            channel.set_id(0, 0, 0)
-            channel.enable_extended_messages(1)
-            channel.set_rf_freq(ANTPLUS_RF_FREQUENCY)
-            channel.open_rx_scan_mode()
-
-            _LOGGER.info("Capture started on adapter %s", self.adapter_id)
-            self._report_state(True)
-            node.start()
-        except Exception as err:
-            _LOGGER.exception("Capture failed on adapter %s", self.adapter_id)
-            self._report_state(False, str(err))
         finally:
             self._node = None
-            self._report_state(False)
-            _LOGGER.info("Capture stopped on adapter %s", self.adapter_id)
+
+            if not self._enabled:
+                self._report_state(False)
+
+            _LOGGER.info(
+                "Capture stopped on adapter %s",
+                self.adapter_id,
+            )
 
 
 class HAConnection:
@@ -373,13 +484,20 @@ class HAConnection:
             self._stop_adapter(adapter_id)
             return
 
-        if adapter_id not in self._scanners:
+        scanner = self._scanners.get(adapter_id)
+
+        if scanner is None:
             scanner = AntScanner(
                 adapter,
                 self.packet_queue,
                 self.state_queue,
             )
             self._scanners[adapter_id] = scanner
+            scanner.start()
+            return
+
+        if not scanner.running:
+            scanner.adapter = adapter
             scanner.start()
 
     async def refresh_adapters(self, websocket, *, force: bool = False) -> None:
