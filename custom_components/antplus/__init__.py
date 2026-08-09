@@ -6,6 +6,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 
+from .adapter import async_register_known_adapters, async_scan_local_adapters
 from .const import DOMAIN, PLATFORMS
 from .receiver import AntPlusReceiver
 from .remote import async_register_remote_listener
@@ -21,10 +22,17 @@ async def async_setup_entry(
 
     await async_cleanup_legacy_entities(hass)
 
+    # Physical ANT USB adapters are Home Assistant devices of their own.
+    # Remembered adapters are re-registered even while offline, and local
+    # Linux USB devices are scanned on every setup.
+    async_register_known_adapters(hass, entry)
+    async_scan_local_adapters(hass, entry)
+
     # Remote ANT+ is always active once HA ANT+ is configured.
     entry.async_on_unload(
         async_register_remote_listener(
             hass,
+            entry,
             receiver,
         )
     )
