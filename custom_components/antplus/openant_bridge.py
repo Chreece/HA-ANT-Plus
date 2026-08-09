@@ -85,12 +85,18 @@ def _profile_classes() -> dict[int, type]:
         try:
             module = importlib.import_module(module_name)
             cls = getattr(module, class_name)
-        except Exception:
+        except (ModuleNotFoundError, AttributeError):
             _LOGGER.debug(
-                "OpenANT parser %s.%s unavailable",
+                "OpenANT optional parser %s.%s unavailable",
                 module_name,
                 class_name,
-                exc_info=True,
+            )
+            continue
+        except Exception:
+            _LOGGER.exception(
+                "Unexpected error loading OpenANT parser %s.%s",
+                module_name,
+                class_name,
             )
             continue
         classes[device_type] = cls

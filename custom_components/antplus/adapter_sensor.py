@@ -10,6 +10,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .adapter import AntAdapterManager, AdapterPresence
 from .openant_bridge import supported_profile_types
+from .subentries import ensure_adapter_subentry
 
 
 async def async_setup_adapter_sensors(
@@ -27,6 +28,8 @@ async def async_setup_adapter_sensors(
         if manager.get(stable_key) is None:
             return
         known.add(stable_key)
+        record = manager.get(stable_key)
+        subentry_id = ensure_adapter_subentry(hass, entry, stable_key, record.adapter.name)
         async_add_entities(
             [
                 AntUsbAdapterConnectionSensor(manager, stable_key),
@@ -35,6 +38,7 @@ async def async_setup_adapter_sensors(
                 AntUsbAdapterDecoderCoverageSensor(manager, stable_key),
             ],
             update_before_add=False,
+            subentry_id=subentry_id,
         )
 
     for stable_key in manager.records:

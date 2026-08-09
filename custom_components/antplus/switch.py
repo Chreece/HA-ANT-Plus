@@ -10,6 +10,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .adapter import AntAdapterManager, AdapterPresence
 from .const import DOMAIN
+from .subentries import ensure_adapter_subentry
 
 
 async def async_setup_entry(
@@ -26,9 +27,12 @@ async def async_setup_entry(
         if stable_key in known or manager.get(stable_key) is None:
             return
         known.add(stable_key)
+        record = manager.get(stable_key)
+        subentry_id = ensure_adapter_subentry(hass, entry, stable_key, record.adapter.name)
         async_add_entities(
             [AntUsbAdapterCaptureSwitch(manager, stable_key)],
             update_before_add=False,
+            subentry_id=subentry_id,
         )
 
     for stable_key in manager.records:

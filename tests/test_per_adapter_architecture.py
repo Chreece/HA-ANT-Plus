@@ -41,11 +41,16 @@ def test_same_ant_sensor_merges_across_multiple_usb_adapters():
 
 
 def test_cleanup_no_longer_lives_on_usb_adapters():
-    source = Path("custom_components/antplus/button.py").read_text()
+    button = Path("custom_components/antplus/button.py").read_text()
+    subentries = Path("custom_components/antplus/subentries.py").read_text()
 
-    assert "AntUsbAdapterCleanupStaleDevicesButton" not in source
-    assert 'name="ANT+ Sensors"' in source
-    assert "SENSORS_PARENT_IDENTIFIER" in source
+    # Cleanup is no longer instantiated once per physical USB adapter.
+    assert "AntUsbAdapterCleanupStaleDevicesButton" not in button
+
+    # It belongs to the dedicated ANT+ Sensors config subentry.
+    assert "ensure_sensor_subentry" in button
+    assert "subentry_id=sensors_subentry_id" in button
+    assert 'title="ANT+ Sensors"' in subentries
 
 
 def test_adapter_diagnostics_live_on_physical_adapter():

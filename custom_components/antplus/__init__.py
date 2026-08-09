@@ -8,9 +8,10 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 
 from .adapter import AntAdapterManager
-from .const import DOMAIN, PLATFORMS, SENSORS_PARENT_IDENTIFIER
+from .const import DOMAIN, PLATFORMS
 from .receiver import AntPlusReceiver
 from .remote import async_register_remote_listener
+from .subentries import migrate_devices_to_subentries
 
 
 async def async_setup_entry(
@@ -24,18 +25,10 @@ async def async_setup_entry(
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = receiver
 
-    device_registry = dr.async_get(hass)
-    sensor_parent = device_registry.async_get_or_create(
-        config_entry_id=entry.entry_id,
-        identifiers={SENSORS_PARENT_IDENTIFIER},
-        name="ANT+ Sensors",
-        manufacturer="HA ANT+",
-        model="Logical ANT+ Sensor Collection",
-    )
-
     await async_cleanup_legacy_entities(hass, entry)
     await adapter_manager.async_start()
     entry.async_on_unload(adapter_manager.stop)
+    migrate_devices_to_subentries(hass, entry, adapter_manager)
 
     entry.async_on_unload(
         async_register_remote_listener(
@@ -142,27 +135,6 @@ async def async_cleanup_legacy_entities(
     if hub is not None:
         device_registry.async_remove_device(hub.id)
 
-    sensor_parent = device_registry.async_get_device_by_identifier(
-        SENSORS_PARENT_IDENTIFIER,
-        entry.entry_id,
-    )
-
-    if sensor_parent is not None:
-        for device in list(device_registry.devices.values()):
-            if entry.entry_id not in device.config_entries:
-                continue
-
-            is_ant_sensor = any(
-                domain == DOMAIN and str(value).isdigit()
-                for domain, value in device.identifiers
-            )
-            if not is_ant_sensor:
-                continue
-
-            device_registry.async_update_device(
-                device.id,
-                via_device_id=sensor_parent.id,
-            )
 
     integration_device = device_registry.async_get_device_by_identifier(
         (DOMAIN, "integration"),

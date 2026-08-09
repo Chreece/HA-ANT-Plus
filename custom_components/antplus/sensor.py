@@ -17,13 +17,13 @@ from .adapter_sensor import async_setup_adapter_sensors
 from .const import (
     DEFAULT_INACTIVITY_TIMEOUT,
     DOMAIN,
-    SENSORS_PARENT_IDENTIFIER,
     device_display_name,
     device_model_name,
 )
 from .entity import AntPlusEntity
 from .models import AntDevice
 from .receiver import AntPlusReceiver
+from .subentries import ensure_sensor_subentry
 
 
 async def async_setup_entry(
@@ -40,6 +40,7 @@ async def async_setup_entry(
         async_add_entities,
     )
     timeout = int(entry.options.get("inactivity_timeout", DEFAULT_INACTIVITY_TIMEOUT))
+    sensors_subentry_id = ensure_sensor_subentry(hass, entry)
     known_entities: set[tuple[int, str]] = set()
 
 
@@ -55,6 +56,7 @@ async def async_setup_entry(
         async_add_entities(
             [AntPlusSensor(receiver, device, metric_key, timeout)],
             update_before_add=False,
+            subentry_id=sensors_subentry_id,
         )
 
     def metric_changed(device: AntDevice, metric_key: str) -> None:

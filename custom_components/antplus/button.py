@@ -10,10 +10,10 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
-from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN, SENSORS_PARENT_IDENTIFIER
+from .const import DOMAIN
+from .subentries import ensure_sensor_subentry
 from .receiver import AntPlusReceiver
 
 _LOGGER = logging.getLogger(__name__)
@@ -94,9 +94,11 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     receiver: AntPlusReceiver = hass.data[DOMAIN][entry.entry_id]
+    sensors_subentry_id = ensure_sensor_subentry(hass, entry)
     async_add_entities(
         [AntPlusCleanupStaleDevicesButton(hass, entry, receiver)],
         update_before_add=False,
+        subentry_id=sensors_subentry_id,
     )
 
 
@@ -117,14 +119,6 @@ class AntPlusCleanupStaleDevicesButton(ButtonEntity):
         self._receiver = receiver
         self._last_removed: list[int] = []
 
-    @property
-    def device_info(self) -> DeviceInfo:
-        return DeviceInfo(
-            identifiers={SENSORS_PARENT_IDENTIFIER},
-            name="ANT+ Sensors",
-            manufacturer="HA ANT+",
-            model="Logical ANT+ Sensor Collection",
-        )
 
     @property
     def available(self) -> bool:
