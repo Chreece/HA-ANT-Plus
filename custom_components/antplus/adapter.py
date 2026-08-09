@@ -40,6 +40,8 @@ LEGACY_ADAPTER_IDENTIFIER = (DOMAIN, "usb_adapter")
 LOCAL_SCAN_INTERVAL = timedelta(seconds=5)
 REMOTE_EXPIRE_INTERVAL = timedelta(seconds=15)
 REMOTE_EXPIRE_SECONDS = 45.0
+LOCAL_MISSING_GRACE_SECONDS = 15.0
+REMOTE_ADAPTER_MISSING_GRACE_SECONDS = 20.0
 
 AdapterCallback = Callable[[str], None]
 
@@ -128,6 +130,7 @@ class AntUsbAdapter:
 class AdapterPresence:
     adapter: AntUsbAdapter
     local_present: bool = False
+    local_last_seen: float | None = None
     remote_gateways: dict[str, float] | None = None
     capture_enabled: bool = False
 
@@ -545,19 +548,30 @@ class AntAdapterManager:
         )
         present_keys = {adapter.stable_key for adapter in adapters}
 
+        now = time.monotonic()
+
         for adapter in adapters:
             record = self._ensure_record(adapter)
             changed = not record.local_present
             record.local_present = True
+            record.local_last_seen = now
             self._sync_local_capture(adapter.stable_key)
             if changed:
                 self._notify(adapter.stable_key)
 
         for stable_key, record in self._records.items():
-            if record.local_present and stable_key not in present_keys:
-                record.local_present = False
-                self._sync_local_capture(stable_key)
-                self._notify(stable_key)
+            if not record.local_present or stable_key in present_keys:
+                continue
+
+            if (
+                record.local_last_seen is not None
+                and now - record.local_last_seen <= LOCAL_MISSING_GRACE_SECONDS
+            ):
+                continue
+
+            record.local_present = False
+            self._sync_local_capture(stable_key)
+            self._notify(stable_key)
 
     def update_remote_gateway(
         self,
@@ -568,14 +582,8 @@ class AntAdapterManager:
         self._remote_gateway_last_seen[gateway_id] = now
         current_keys = {adapter.stable_key for adapter in adapters}
 
-        for stable_key, record in self._records.items():
-            if (
-                gateway_id in (record.remote_gateways or {})
-                and stable_key not in current_keys
-            ):
-                record.remote_gateways.pop(gateway_id, None)
-                self._notify(stable_key)
-
+        # Do not remove a remote adapter after one missing USB snapshot.
+        # Capture start/stop can briefly reset/re-enumerate the USB device.
         for adapter in adapters:
             adapter.source = "remote"
             adapter.gateway_id = gateway_id
@@ -593,23 +601,36 @@ class AntAdapterManager:
 
     def expire_remote_gateways(self) -> None:
         now = time.monotonic()
-        expired = {
+
+        expired_gateways = {
             gateway_id
             for gateway_id, last_seen in self._remote_gateway_last_seen.items()
             if now - last_seen > REMOTE_EXPIRE_SECONDS
         }
 
-        if not expired:
-            return
-
-        for gateway_id in expired:
+        for gateway_id in expired_gateways:
             self._remote_gateway_last_seen.pop(gateway_id, None)
 
         for stable_key, record in self._records.items():
             changed = False
-            for gateway_id in expired:
+
+            for gateway_id in expired_gateways:
                 if gateway_id in (record.remote_gateways or {}):
                     record.remote_gateways.pop(gateway_id, None)
                     changed = True
+
+            for gateway_id, adapter_last_seen in list(
+                (record.remote_gateways or {}).items()
+            ):
+                if gateway_id not in self._remote_gateway_last_seen:
+                    continue
+
+                if (
+                    now - adapter_last_seen
+                    > REMOTE_ADAPTER_MISSING_GRACE_SECONDS
+                ):
+                    record.remote_gateways.pop(gateway_id, None)
+                    changed = True
+
             if changed:
                 self._notify(stable_key)

@@ -1,0 +1,11 @@
+from custom_components.antplus.adapter import (
+    LOCAL_MISSING_GRACE_SECONDS,
+    REMOTE_ADAPTER_MISSING_GRACE_SECONDS,
+    REMOTE_EXPIRE_SECONDS,
+)
+
+
+def test_presence_grace_windows():
+    assert LOCAL_MISSING_GRACE_SECONDS > 5
+    assert REMOTE_ADAPTER_MISSING_GRACE_SECONDS > 5
+    assert REMOTE_ADAPTER_MISSING_GRACE_SECONDS < REMOTE_EXPIRE_SECONDS
