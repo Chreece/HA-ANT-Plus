@@ -130,7 +130,11 @@ def async_register_remote_listener(
         if not adapters and isinstance(data.get("adapter"), dict):
             adapters = _parse_adapters([data["adapter"]], gateway_id)
 
-        adapter_manager.update_remote_gateway(gateway_id, adapters)
+        adapter_manager.update_remote_gateway(
+            gateway_id,
+            adapters,
+            reconcile_capture=True,
+        )
         _LOGGER.info(
             "Remote ANT+ gateway connected: %s (%d adapter(s))",
             gateway_id,

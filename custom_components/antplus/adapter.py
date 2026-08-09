@@ -829,6 +829,8 @@ class AntAdapterManager:
         self,
         gateway_id: str,
         adapters: list[AntUsbAdapter],
+        *,
+        reconcile_capture: bool = False,
     ) -> None:
         now = time.monotonic()
         self._remote_gateway_last_seen[gateway_id] = now
@@ -852,7 +854,7 @@ class AntAdapterManager:
             record.remote_gateways[gateway_id] = now
             record.remote_missing_since.pop(gateway_id, None)
 
-            if new_presence:
+            if new_presence or reconcile_capture:
                 self._send_remote_capture(
                     adapter.stable_key,
                     gateway_id,
