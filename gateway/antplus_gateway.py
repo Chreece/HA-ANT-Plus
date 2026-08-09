@@ -11,6 +11,7 @@ from pathlib import Path
 import queue
 import socket
 import threading
+import time
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
@@ -22,10 +23,19 @@ from openant.easy.node import Node
 
 ANTPLUS_NETWORK_NUMBER = 0
 ANTPLUS_RF_FREQUENCY = 57
+
 PACKET_EVENT = "antplus_remote_packet"
 HELLO_EVENT = "antplus_gateway_hello"
+STATUS_EVENT = "antplus_gateway_status"
 CAPTURE_STATE_EVENT = "antplus_capture_state"
-SUPPORTED_USB_IDS = {("0FCF", "1008"), ("0FCF", "1009")}
+
+SUPPORTED_USB_IDS = {
+    ("0FCF", "1008"),
+    ("0FCF", "1009"),
+}
+
+USB_RESCAN_INTERVAL = 5.0
+HEARTBEAT_INTERVAL = 15.0
 
 _LOGGER = logging.getLogger("ha_antplus_gateway")
 
@@ -71,11 +81,13 @@ def websocket_url(ha_url: str) -> str:
     return f"{scheme}://{parsed.netloc}{parsed.path.rstrip('/')}/api/websocket"
 
 
-def detect_ant_adapter() -> dict[str, Any] | None:
-    """Return metadata for the first supported ANT USB adapter in Linux sysfs."""
+def detect_ant_adapters() -> list[dict[str, Any]]:
+    """Return all supported ANT USB adapters in Linux sysfs."""
+    result: list[dict[str, Any]] = []
     root = Path("/sys/bus/usb/devices")
+
     if not root.exists():
-        return None
+        return result
 
     for device_path in sorted(root.glob("*")):
         try:
@@ -94,16 +106,29 @@ def detect_ant_adapter() -> dict[str, Any] | None:
                 return None
             return value or None
 
-        return {
-            "vid": vid,
-            "pid": pid,
-            "serial": read_optional("serial"),
-            "manufacturer": read_optional("manufacturer"),
-            "product": read_optional("product"),
-            "path": str(device_path),
-        }
+        result.append(
+            {
+                "vid": vid,
+                "pid": pid,
+                "serial": read_optional("serial"),
+                "manufacturer": read_optional("manufacturer"),
+                "product": read_optional("product"),
+                "path": str(device_path),
+            }
+        )
 
-    return None
+    return result
+
+
+def adapter_identity(adapter: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        adapter.get("vid"),
+        adapter.get("pid"),
+        adapter.get("serial"),
+        adapter.get("manufacturer"),
+        adapter.get("product"),
+        adapter.get("path"),
+    )
 
 
 class AntScanner:
@@ -119,7 +144,10 @@ class AntScanner:
         return self._enabled
 
     def set_enabled(self, enabled: bool) -> None:
-        self.start() if enabled else self.stop()
+        if enabled:
+            self.start()
+        else:
+            self.stop()
 
     def start(self) -> None:
         with self._lock:
@@ -151,8 +179,9 @@ class AntScanner:
             "device_id": int(data[9]) | (int(data[10]) << 8),
             "device_type": int(data[11]),
             "transmission_type": int(data[12]),
-            "payload": bytes(int(v) & 0xFF for v in data[:8]).hex(),
+            "payload": bytes(int(value) & 0xFF for value in data[:8]).hex(),
         }
+
         try:
             self.packet_queue.put_nowait(packet)
         except queue.Full:
@@ -199,19 +228,21 @@ class HAConnection:
         self.packet_queue = packet_queue
         self.next_id = 1
         self.capture_known = False
+        self._adapters: list[dict[str, Any]] = []
+        self._last_status_sent = 0.0
 
-    async def send(self, ws, payload: dict[str, Any]) -> None:
+    async def send(self, websocket, payload: dict[str, Any]) -> None:
         payload = dict(payload)
         payload["id"] = self.next_id
         self.next_id += 1
-        await ws.send(json.dumps(payload))
+        await websocket.send(json.dumps(payload))
 
-    async def authenticate(self, ws) -> None:
-        msg = json.loads(await ws.recv())
-        if msg.get("type") != "auth_required":
+    async def authenticate(self, websocket) -> None:
+        message = json.loads(await websocket.recv())
+        if message.get("type") != "auth_required":
             raise RuntimeError("Unexpected HA WebSocket handshake")
 
-        await ws.send(
+        await websocket.send(
             json.dumps(
                 {
                     "type": "auth",
@@ -220,11 +251,62 @@ class HAConnection:
             )
         )
 
-        msg = json.loads(await ws.recv())
-        if msg.get("type") != "auth_ok":
+        message = json.loads(await websocket.recv())
+        if message.get("type") != "auth_ok":
             raise RuntimeError("Home Assistant authentication failed")
 
-    async def sender(self, ws) -> None:
+        _LOGGER.info("Authenticated with Home Assistant")
+
+    async def send_status(self, websocket, *, force: bool = False) -> None:
+        now = time.monotonic()
+        loop = asyncio.get_running_loop()
+        adapters = await loop.run_in_executor(None, detect_ant_adapters)
+
+        old_identity = [adapter_identity(item) for item in self._adapters]
+        new_identity = [adapter_identity(item) for item in adapters]
+        changed = old_identity != new_identity
+
+        if (
+            not force
+            and not changed
+            and now - self._last_status_sent < HEARTBEAT_INTERVAL
+        ):
+            return
+
+        self._adapters = adapters
+        self._last_status_sent = now
+
+        await self.send(
+            websocket,
+            {
+                "type": "fire_event",
+                "event_type": STATUS_EVENT,
+                "event_data": {
+                    "gateway_id": self.settings.gateway_id,
+                    "adapters": adapters,
+                },
+            },
+        )
+
+        if changed:
+            description = ", ".join(
+                f"{item['vid']}:{item['pid']} serial={item.get('serial') or '<none>'}"
+                for item in adapters
+            ) or "none"
+
+            _LOGGER.info("ANT USB adapters changed: %s", description)
+
+            if not adapters:
+                self.scanner.set_enabled(False)
+            elif self.capture_known and not self.scanner.enabled:
+                self.scanner.set_enabled(True)
+
+    async def status_loop(self, websocket) -> None:
+        while True:
+            await self.send_status(websocket)
+            await asyncio.sleep(USB_RESCAN_INTERVAL)
+
+    async def packet_sender(self, websocket) -> None:
         while True:
             await asyncio.sleep(self.settings.batch_interval)
 
@@ -240,7 +322,7 @@ class HAConnection:
 
             if packets:
                 await self.send(
-                    ws,
+                    websocket,
                     {
                         "type": "fire_event",
                         "event_type": PACKET_EVENT,
@@ -253,60 +335,53 @@ class HAConnection:
 
     async def run_session(self) -> None:
         uri = websocket_url(self.settings.ha_url)
-        adapter = detect_ant_adapter()
-
-        if adapter:
-            _LOGGER.info(
-                "Detected ANT USB adapter %s:%s serial=%s",
-                adapter["vid"],
-                adapter["pid"],
-                adapter.get("serial") or "<none>",
-            )
-        else:
-            _LOGGER.warning("No supported ANT USB adapter detected in sysfs")
 
         async with websockets.connect(
             uri,
             ping_interval=20,
             ping_timeout=20,
-        ) as ws:
-            await self.authenticate(ws)
+        ) as websocket:
+            await self.authenticate(websocket)
+
             self.capture_known = False
             self.scanner.set_enabled(False)
+            loop = asyncio.get_running_loop()
+            self._adapters = await loop.run_in_executor(None, detect_ant_adapters)
 
             await self.send(
-                ws,
+                websocket,
                 {
                     "type": "subscribe_events",
                     "event_type": CAPTURE_STATE_EVENT,
                 },
             )
 
-            hello_data: dict[str, Any] = {
-                "gateway_id": self.settings.gateway_id,
-            }
-            if adapter:
-                hello_data["adapter"] = adapter
-
             await self.send(
-                ws,
+                websocket,
                 {
                     "type": "fire_event",
                     "event_type": HELLO_EVENT,
-                    "event_data": hello_data,
+                    "event_data": {
+                        "gateway_id": self.settings.gateway_id,
+                        "adapters": self._adapters,
+                    },
                 },
             )
 
-            sender_task = asyncio.create_task(self.sender(ws))
+            self._last_status_sent = 0.0
+            await self.send_status(websocket, force=True)
+
+            packet_task = asyncio.create_task(self.packet_sender(websocket))
+            status_task = asyncio.create_task(self.status_loop(websocket))
 
             try:
-                async for raw in ws:
-                    msg = json.loads(raw)
+                async for raw in websocket:
+                    message = json.loads(raw)
 
-                    if msg.get("type") != "event":
+                    if message.get("type") != "event":
                         continue
 
-                    event = msg.get("event") or {}
+                    event = message.get("event") or {}
                     if event.get("event_type") != CAPTURE_STATE_EVENT:
                         continue
 
@@ -318,20 +393,30 @@ class HAConnection:
                     enabled = bool(data.get("enabled", False))
                     self.capture_known = True
 
-                    if enabled != self.scanner.enabled:
-                        _LOGGER.info(
-                            "Global Capture -> %s",
-                            "ON" if enabled else "OFF",
-                        )
-                        self.scanner.set_enabled(enabled)
+                    should_run = enabled and bool(self._adapters)
+
+                    _LOGGER.info(
+                        "Global Capture -> %s",
+                        "ON" if enabled else "OFF",
+                    )
+
+                    self.scanner.set_enabled(should_run)
 
             finally:
-                sender_task.cancel()
+                packet_task.cancel()
+                status_task.cancel()
+                for task in (packet_task, status_task):
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
 
     async def run_forever(self) -> None:
         while True:
             try:
                 await self.run_session()
+            except asyncio.CancelledError:
+                raise
             except Exception as err:
                 _LOGGER.warning("HA connection lost: %s", err)
 
@@ -343,8 +428,14 @@ async def amain() -> None:
     settings = load_settings()
     packet_queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=10000)
     scanner = AntScanner(packet_queue)
+
     _LOGGER.info("Starting HA ANT+ gateway %s", settings.gateway_id)
-    await HAConnection(settings, scanner, packet_queue).run_forever()
+
+    await HAConnection(
+        settings,
+        scanner,
+        packet_queue,
+    ).run_forever()
 
 
 if __name__ == "__main__":
@@ -352,6 +443,7 @@ if __name__ == "__main__":
         level=os.environ.get("LOG_LEVEL", "INFO").upper(),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+
     try:
         asyncio.run(amain())
     except KeyboardInterrupt:

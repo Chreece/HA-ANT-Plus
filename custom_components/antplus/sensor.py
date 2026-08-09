@@ -13,6 +13,7 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_track_time_interval
 
+from .adapter_sensor import async_setup_adapter_sensors
 from .const import (
     DEFAULT_INACTIVITY_TIMEOUT,
     DOMAIN,
@@ -30,6 +31,13 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     receiver: AntPlusReceiver = hass.data[DOMAIN][entry.entry_id]
+    adapter_manager = receiver.adapter_manager
+    await async_setup_adapter_sensors(
+        hass,
+        entry,
+        adapter_manager,
+        async_add_entities,
+    )
     timeout = int(entry.options.get("inactivity_timeout", DEFAULT_INACTIVITY_TIMEOUT))
     known_entities: set[tuple[int, str]] = set()
 

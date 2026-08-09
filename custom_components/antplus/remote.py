@@ -8,10 +8,11 @@ from typing import Any, Callable
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import Event, HomeAssistant, callback
 
-from .adapter import AntUsbAdapter, async_register_adapter
+from .adapter import AntAdapterManager, AntUsbAdapter
 from .const import (
     REMOTE_CAPTURE_STATE_EVENT,
     REMOTE_GATEWAY_HELLO_EVENT,
+    REMOTE_GATEWAY_STATUS_EVENT,
     REMOTE_PACKET_EVENT,
 )
 from .receiver import AntPlusReceiver
@@ -69,12 +70,39 @@ def _process_remote_packet(
     )
 
 
+def _parse_adapters(value: Any, gateway_id: str) -> list[AntUsbAdapter]:
+    if not isinstance(value, list):
+        return []
+
+    result: list[AntUsbAdapter] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        try:
+            result.append(
+                AntUsbAdapter.from_mapping(
+                    {
+                        **item,
+                        "source": "remote",
+                        "gateway_id": gateway_id,
+                    }
+                )
+            )
+        except (KeyError, TypeError, ValueError):
+            _LOGGER.warning(
+                "Ignoring invalid adapter metadata from gateway %s",
+                gateway_id,
+            )
+    return result
+
+
 def async_register_remote_listener(
     hass: HomeAssistant,
     entry: ConfigEntry,
     receiver: AntPlusReceiver,
+    adapter_manager: AntAdapterManager,
 ) -> Callable[[], None]:
-    """Register remote packet, adapter and capture-state listeners."""
+    """Register remote packets, gateway presence and capture-state sync."""
 
     def fire_capture_state(gateway_id: str | None = None) -> None:
         data: dict[str, Any] = {"enabled": receiver.capture_enabled}
@@ -114,57 +142,39 @@ def async_register_remote_listener(
         data = event.data
         gateway_id = str(data.get("gateway_id", "")).strip() or "unknown"
 
-        adapter_data = data.get("adapter")
-        if isinstance(adapter_data, dict):
-            try:
-                adapter = AntUsbAdapter.from_mapping(
-                    {
-                        **adapter_data,
-                        "source": "remote",
-                        "gateway_id": gateway_id,
-                    }
-                )
-                async_register_adapter(
-                    hass,
-                    entry,
-                    adapter,
-                    allow_legacy_migration=False,
-                )
-                _LOGGER.info(
-                    "Remote ANT+ gateway %s reports adapter %s",
-                    gateway_id,
-                    adapter.stable_key,
-                )
-            except (KeyError, TypeError, ValueError) as err:
-                _LOGGER.warning(
-                    "Remote ANT+ gateway %s sent invalid adapter identity: %s",
-                    gateway_id,
-                    err,
-                )
-        else:
-            _LOGGER.info(
-                "Remote ANT+ gateway connected without adapter metadata: %s",
-                gateway_id,
-            )
+        adapters = _parse_adapters(data.get("adapters", []), gateway_id)
 
+        if not adapters and isinstance(data.get("adapter"), dict):
+            adapters = _parse_adapters([data["adapter"]], gateway_id)
+
+        adapter_manager.update_remote_gateway(gateway_id, adapters)
+
+        _LOGGER.info(
+            "Remote ANT+ gateway connected: %s (%d adapter(s))",
+            gateway_id,
+            len(adapters),
+        )
         fire_capture_state(gateway_id)
+
+    @callback
+    def handle_gateway_status(event: Event) -> None:
+        data = event.data
+        gateway_id = str(data.get("gateway_id", "")).strip() or "unknown"
+        adapters = _parse_adapters(data.get("adapters", []), gateway_id)
+        adapter_manager.update_remote_gateway(gateway_id, adapters)
 
     def receiver_changed() -> None:
         hass.loop.call_soon_threadsafe(fire_capture_state)
 
-    unsub_packet = hass.bus.async_listen(
-        REMOTE_PACKET_EVENT,
-        handle_packet_event,
-    )
-    unsub_hello = hass.bus.async_listen(
-        REMOTE_GATEWAY_HELLO_EVENT,
-        handle_gateway_hello,
-    )
+    unsub_packet = hass.bus.async_listen(REMOTE_PACKET_EVENT, handle_packet_event)
+    unsub_hello = hass.bus.async_listen(REMOTE_GATEWAY_HELLO_EVENT, handle_gateway_hello)
+    unsub_status = hass.bus.async_listen(REMOTE_GATEWAY_STATUS_EVENT, handle_gateway_status)
     unsub_receiver = receiver.add_state_callback(receiver_changed)
 
     def unsubscribe() -> None:
         unsub_packet()
         unsub_hello()
+        unsub_status()
         unsub_receiver()
 
     return unsubscribe

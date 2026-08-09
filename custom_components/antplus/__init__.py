@@ -7,7 +7,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 
-from .adapter import async_register_known_adapters, async_scan_local_adapters
+from .adapter import AntAdapterManager
 from .const import DOMAIN, PLATFORMS
 from .receiver import AntPlusReceiver
 from .remote import async_register_remote_listener
@@ -19,30 +19,25 @@ async def async_setup_entry(
 ) -> bool:
     """Set up HA ANT+."""
     receiver = AntPlusReceiver()
+    adapter_manager = AntAdapterManager(hass, entry)
+    receiver.adapter_manager = adapter_manager
+
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = receiver
 
     await async_cleanup_legacy_entities(hass, entry)
+    await adapter_manager.async_start()
+    entry.async_on_unload(adapter_manager.stop)
 
-    # Physical ANT USB adapters are Home Assistant devices of their own.
-    # Remembered adapters are re-registered even while offline, and local
-    # Linux USB devices are scanned on every setup.
-    async_register_known_adapters(hass, entry)
-    await async_scan_local_adapters(hass, entry)
-
-    # Remote ANT+ is always active once HA ANT+ is configured.
     entry.async_on_unload(
         async_register_remote_listener(
             hass,
             entry,
             receiver,
+            adapter_manager,
         )
     )
 
-    # Try local USB as well, but never make the integration depend on it.
-    #
-    # wait=False means the executor call returns immediately after starting
-    # the receiver thread. A remote-only installation therefore loads
-    # normally even when there is no ANT USB adapter on this HA host.
+    # Optional local transport. Missing local USB is a normal remote-only state.
     await hass.async_add_executor_job(receiver.start, False)
 
     await hass.config_entries.async_forward_entry_setups(
@@ -79,7 +74,6 @@ async def async_unload_entry(
         return False
 
     receiver: AntPlusReceiver = hass.data[DOMAIN].pop(entry.entry_id)
-
     await hass.async_add_executor_job(receiver.stop)
 
     if not hass.data[DOMAIN]:
@@ -132,10 +126,7 @@ async def async_cleanup_legacy_entities(
 
         if (
             unique_id in obsolete_unique_ids
-            or any(
-                unique_id.endswith(suffix)
-                for suffix in unwanted_suffixes
-            )
+            or any(unique_id.endswith(suffix) for suffix in unwanted_suffixes)
         ):
             entity_registry.async_remove(entity.entity_id)
             continue
