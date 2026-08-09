@@ -29,7 +29,7 @@ async def async_setup_adapter_sensors(
             return
         known.add(stable_key)
         record = manager.get(stable_key)
-        subentry_id = ensure_adapter_subentry(hass, entry, stable_key, record.adapter.name)
+        subentry_id = ensure_adapter_subentry(hass, entry, stable_key, record.adapter.subentry_name)
         async_add_entities(
             [
                 AntUsbAdapterConnectionSensor(manager, stable_key),

@@ -108,6 +108,16 @@ class AntUsbAdapter:
             return f"{base} {self.serial}"
         return base
 
+    @property
+    def subentry_name(self) -> str:
+        # Host-independent title derived only from USB metadata.
+        base = self.product or "ANT+ USB Adapter"
+
+        if self.serial:
+            return f"{base} {self.serial}"
+
+        return f"{base} {self.vid}:{self.pid}"
+
     def identity_storage(self) -> dict[str, Any]:
         return {
             "vid": self.vid,
