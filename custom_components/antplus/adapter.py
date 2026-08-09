@@ -359,12 +359,19 @@ class AntAdapterManager:
         }
 
     def _persist_record(self, record: AdapterPresence) -> None:
+        """Persist only physical adapter identity, never live Capture state."""
         known = self._known_adapters()
         stored = record.adapter.identity_storage()
-        stored["capture_enabled"] = record.capture_enabled
 
-        if known.get(record.adapter.stable_key) == stored:
-            return
+        existing = known.get(record.adapter.stable_key)
+        if isinstance(existing, dict):
+            existing_identity = {
+                key: value
+                for key, value in existing.items()
+                if key != "capture_enabled"
+            }
+            if existing_identity == stored:
+                return
 
         known[record.adapter.stable_key] = stored
         self.hass.config_entries.async_update_entry(
@@ -459,7 +466,7 @@ class AntAdapterManager:
                 continue
             self._ensure_record(
                 adapter,
-                saved_capture=bool(data.get("capture_enabled", False)),
+                saved_capture=False,
             )
 
         await self.async_refresh_local()
@@ -533,7 +540,6 @@ class AntAdapterManager:
             return
 
         record.capture_enabled = bool(enabled)
-        self._persist_record(record)
         self._sync_local_capture(stable_key)
 
         for gateway_id in sorted(record.remote_gateways or {}):
