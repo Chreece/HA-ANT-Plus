@@ -19,6 +19,7 @@ from .const import (
     DEVICE_TYPE_FITNESS_EQUIPMENT,
     DEVICE_TYPE_HEART_RATE,
     DEVICE_TYPE_POWER,
+    DEVICE_TYPE_SHIFTING,
     DEVICE_TYPE_STRIDE_SPEED,
 )
 from .models import AntDevice, AntMetric
@@ -96,6 +97,7 @@ def decode_packet(
         DEVICE_TYPE_BIKE_SPEED,
         DEVICE_TYPE_BIKE_CADENCE,
         DEVICE_TYPE_BIKE_SPEED_CADENCE,
+        DEVICE_TYPE_SHIFTING,
         DEVICE_TYPE_STRIDE_SPEED,
     }
 
@@ -132,6 +134,8 @@ def decode_packet(
         metrics.extend(_decode_bike_speed(device, payload))
     elif device_type == DEVICE_TYPE_BIKE_SPEED_CADENCE:
         metrics.extend(_decode_bike_speed_cadence(device, payload))
+    elif device_type == DEVICE_TYPE_SHIFTING:
+        metrics.extend(_decode_shifting(payload))
     elif device_type == DEVICE_TYPE_STRIDE_SPEED:
         metrics.extend(_decode_stride_speed(device, payload))
 
@@ -576,6 +580,45 @@ def _decode_bike_speed_cadence(device: AntDevice, data: bytes) -> list[AntMetric
     return metrics
 
 
+
+
+def _decode_shifting(data: bytes) -> list[AntMetric]:
+    """Decode validated ANT+ Shifting status and trim pages."""
+    page = data[0] & 0x7F
+    metrics: list[AntMetric] = []
+
+    if page == 0x01:
+        rear = data[3] & 0x1F
+        front = (data[3] & 0xE0) >> 5
+        total_rear = data[4] & 0x1F
+        total_front = (data[4] & 0xE0) >> 5
+        metrics.extend([
+            _metric("rear_gear", "Rear Gear", rear, icon="mdi:cog"),
+            _metric("front_gear", "Front Gear", front, icon="mdi:cog-outline"),
+            _metric("rear_gear_count", "Rear Gear Count", total_rear, icon="mdi:counter", entity_category=EntityCategory.DIAGNOSTIC, enabled_default=False, availability_mode="device"),
+            _metric("front_gear_count", "Front Gear Count", total_front, icon="mdi:counter", entity_category=EntityCategory.DIAGNOSTIC, enabled_default=False, availability_mode="device"),
+            _metric("shift_event_count", "Shift Event Count", data[1], icon="mdi:counter", entity_category=EntityCategory.DIAGNOSTIC, enabled_default=False, availability_mode="device"),
+        ])
+        diagnostic_values = (
+            ("invalid_rear_inboard_shifts", "Invalid Rear Inboard Shifts", data[5] & 0x0F),
+            ("invalid_rear_outboard_shifts", "Invalid Rear Outboard Shifts", (data[5] & 0xF0) >> 4),
+            ("invalid_front_inboard_shifts", "Invalid Front Inboard Shifts", data[6] & 0x0F),
+            ("invalid_front_outboard_shifts", "Invalid Front Outboard Shifts", (data[6] & 0xF0) >> 4),
+            ("rear_shift_failures", "Rear Shift Failures", data[7] & 0x0F),
+            ("front_shift_failures", "Front Shift Failures", (data[7] & 0xF0) >> 4),
+        )
+        for key, name, value in diagnostic_values:
+            metrics.append(_metric(key, name, value, icon="mdi:alert-circle-outline", entity_category=EntityCategory.DIAGNOSTIC, enabled_default=False, availability_mode="device"))
+
+    elif page == 0x04:
+        metrics.extend([
+            _metric("rear_trim", "Rear Trim", data[4], icon="mdi:tune-variant"),
+            _metric("front_trim", "Front Trim", data[5], icon="mdi:tune"),
+            _metric("rear_trim_max", "Rear Trim Maximum", data[2], icon="mdi:tune-variant", entity_category=EntityCategory.DIAGNOSTIC, enabled_default=False, availability_mode="device"),
+            _metric("front_trim_max", "Front Trim Maximum", data[3], icon="mdi:tune", entity_category=EntityCategory.DIAGNOSTIC, enabled_default=False, availability_mode="device"),
+        ])
+
+    return metrics
 
 def _decode_stride_speed(device: AntDevice, data: bytes) -> list[AntMetric]:
     """Decode ANT+ Stride Based Speed & Distance (device type 124).

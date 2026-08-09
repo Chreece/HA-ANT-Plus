@@ -66,17 +66,6 @@ def _profile_classes() -> dict[int, type]:
         # Additional published ANT+ profiles. Imports are deliberately
         # defensive: supported OpenANT versions gain semantic decoding
         # automatically; otherwise raw/common-page fallback remains active.
-        (15, "openant.devices.multi_sport_speed_distance", "MultiSportSpeedDistance"),
-        (18, "openant.devices.blood_pressure", "BloodPressure"),
-        (19, "openant.devices.geocache", "Geocache"),
-        (26, "openant.devices.racquet", "Racquet"),
-        (30, "openant.devices.running_dynamics", "RunningDynamics"),
-        (31, "openant.devices.muscle_oxygen", "MuscleOxygen"),
-        (35, "openant.devices.bike_light", "BikeLight"),
-        (40, "openant.devices.radar", "Radar"),
-        (41, "openant.devices.tracker", "Tracker"),
-        (116, "openant.devices.suspension", "Suspension"),
-        (119, "openant.devices.weight_scale", "WeightScale"),
     )
 
     import importlib

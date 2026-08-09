@@ -50,7 +50,29 @@ def test_market_profile_catalogue():
 
 
 def test_extended_openant_bridge_is_defensive():
-    source = Path("custom_components/antplus/openant_bridge.py").read_text()
+    source = Path(
+        "custom_components/antplus/openant_bridge.py"
+    ).read_text()
+
+    # Only parsers actually known to exist in OpenANT should be probed.
+    for module_name in (
+        "power_meter",
+        "controls_device",
+        "fitness_equipment",
+        "lev",
+        "environment",
+        "shift",
+        "tire_pressure_monitor",
+        "dropper_seatpost",
+        "heart_rate",
+        "bike_speed_cadence",
+        "core_temp",
+    ):
+        assert f"openant.devices.{module_name}" in source
+
+    # Profiles OpenANT does not ship must not be advertised as semantic
+    # fallback support. They are handled by native decoders or the explicit
+    # profile-support matrix instead.
     for module_name in (
         "blood_pressure",
         "racquet",
@@ -62,5 +84,7 @@ def test_extended_openant_bridge_is_defensive():
         "suspension",
         "weight_scale",
     ):
-        assert f"openant.devices.{module_name}" in source
-    assert "except Exception:" in source
+        assert f"openant.devices.{module_name}" not in source
+
+    # Missing optional parsers remain non-fatal.
+    assert "except (ModuleNotFoundError, AttributeError):" in source

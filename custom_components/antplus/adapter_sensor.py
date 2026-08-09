@@ -10,6 +10,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .adapter import AntAdapterManager, AdapterPresence
 from .openant_bridge import supported_profile_types
+from .profile_support import native_profile_types, profile_support_rows
 from .subentries import ensure_adapter_subentry
 
 
@@ -233,19 +234,13 @@ class AntUsbAdapterDecoderCoverageSensor(AntUsbAdapterDiagnosticSensor):
 
     @property
     def native_value(self):
-        return len(supported_profile_types() | {124})
+        return len(native_profile_types())
 
     @property
     def extra_state_attributes(self):
-        from .const import DEVICE_TYPE_NAMES
-        types = sorted(supported_profile_types() | {124})
         return {
-            "decoded_profiles": [
-                {
-                    "device_type": profile,
-                    "name": DEVICE_TYPE_NAMES.get(profile, f"Profile {profile}"),
-                }
-                for profile in types
-            ],
+            "native_profiles": sorted(native_profile_types()),
+            "openant_fallback_profiles": sorted(supported_profile_types() - native_profile_types()),
+            "profile_matrix": profile_support_rows(),
             "raw_fallback_for_all_profiles": True,
         }
