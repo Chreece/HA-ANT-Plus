@@ -10,6 +10,7 @@ from homeassistant.core import Event, HomeAssistant, callback
 
 from .adapter import AntAdapterManager, AntUsbAdapter
 from .const import (
+    REMOTE_ADAPTER_CAPTURE_STATE_EVENT,
     REMOTE_GATEWAY_HELLO_EVENT,
     REMOTE_GATEWAY_STATUS_EVENT,
     REMOTE_PACKET_EVENT,
@@ -143,6 +144,20 @@ def async_register_remote_listener(
         adapters = _parse_adapters(data.get("adapters", []), gateway_id)
         adapter_manager.update_remote_gateway(gateway_id, adapters)
 
+    @callback
+    def handle_capture_state(event: Event) -> None:
+        data = event.data
+        gateway_id = str(data.get("gateway_id", "")).strip()
+        stable_key = str(data.get("adapter_id", "")).strip()
+        if not gateway_id or not stable_key:
+            return
+        adapter_manager.update_remote_capture_state(
+            gateway_id,
+            stable_key,
+            bool(data.get("enabled", False)),
+            str(data.get("error")).strip() if data.get("error") else None,
+        )
+
     unsub_packet = hass.bus.async_listen(
         REMOTE_PACKET_EVENT,
         handle_packet_event,
@@ -155,10 +170,15 @@ def async_register_remote_listener(
         REMOTE_GATEWAY_STATUS_EVENT,
         handle_gateway_status,
     )
+    unsub_capture_state = hass.bus.async_listen(
+        REMOTE_ADAPTER_CAPTURE_STATE_EVENT,
+        handle_capture_state,
+    )
 
     def unsubscribe() -> None:
         unsub_packet()
         unsub_hello()
         unsub_status()
+        unsub_capture_state()
 
     return unsubscribe

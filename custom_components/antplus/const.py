@@ -12,6 +12,7 @@ REMOTE_PACKET_EVENT = "antplus_remote_packet"
 
 REMOTE_GATEWAY_HELLO_EVENT = "antplus_gateway_hello"
 REMOTE_ADAPTER_CAPTURE_EVENT = "antplus_adapter_capture"
+REMOTE_ADAPTER_CAPTURE_STATE_EVENT = "antplus_adapter_capture_state"
 REMOTE_GATEWAY_STATUS_EVENT = "antplus_gateway_status"
 REMOTE_CAPTURE_STATE_EVENT = "antplus_capture_state"
 

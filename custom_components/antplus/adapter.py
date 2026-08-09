@@ -20,6 +20,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.helpers.storage import Store
 
 from .const import DOMAIN, REMOTE_ADAPTER_CAPTURE_EVENT
 from .usb_selected import create_selected_node
@@ -35,6 +36,8 @@ ANTPLUS_NETWORK_NUMBER = 0
 ANTPLUS_RF_FREQUENCY = 57
 
 KNOWN_ADAPTERS_KEY = "known_adapters"
+CAPTURE_STORAGE_VERSION = 1
+CAPTURE_STORAGE_KEY = f"{DOMAIN}.capture_states"
 LEGACY_ADAPTER_IDENTIFIER = (DOMAIN, "usb_adapter")
 
 LOCAL_SCAN_INTERVAL = timedelta(seconds=5)
@@ -133,13 +136,24 @@ class AdapterPresence:
     local_missing_since: float | None = None
     remote_gateways: dict[str, float] | None = None
     remote_missing_since: dict[str, float] | None = None
-    capture_enabled: bool = False
+    desired_capture: bool = False
+    local_capture_enabled: bool = False
+    remote_capture_states: dict[str, bool] | None = None
+    capture_error: str | None = None
 
     def __post_init__(self) -> None:
         if self.remote_gateways is None:
             self.remote_gateways = {}
         if self.remote_missing_since is None:
             self.remote_missing_since = {}
+        if self.remote_capture_states is None:
+            self.remote_capture_states = {}
+
+    @property
+    def capture_enabled(self) -> bool:
+        return self.local_capture_enabled or any(
+            (self.remote_capture_states or {}).values()
+        )
 
     @property
     def available(self) -> bool:
@@ -211,9 +225,15 @@ def scan_linux_ant_adapters() -> list[AntUsbAdapter]:
 class LocalAdapterScanner:
     """One OpenANT scan node bound to one physical local USB adapter."""
 
-    def __init__(self, adapter: AntUsbAdapter, receiver) -> None:
+    def __init__(
+        self,
+        adapter: AntUsbAdapter,
+        receiver,
+        state_callback,
+    ) -> None:
         self.adapter = adapter
         self.receiver = receiver
+        self.state_callback = state_callback
         self._thread: threading.Thread | None = None
         self._node = None
         self._lock = threading.RLock()
@@ -296,14 +316,17 @@ class LocalAdapterScanner:
                 "Capture started on local ANT USB adapter %s",
                 self.adapter.stable_key,
             )
+            self.state_callback(True, None)
             node.start()
-        except Exception:
+        except Exception as err:
             _LOGGER.exception(
                 "Capture failed on local ANT USB adapter %s",
                 self.adapter.stable_key,
             )
+            self.state_callback(False, str(err))
         finally:
             self._node = None
+            self.state_callback(False, None)
             _LOGGER.info(
                 "Capture stopped on local ANT USB adapter %s",
                 self.adapter.stable_key,
@@ -322,6 +345,14 @@ class AntAdapterManager:
         self._remote_gateway_last_seen: dict[str, float] = {}
         self._local_scanners: dict[str, LocalAdapterScanner] = {}
         self._unsubs: list[Callable[[], None]] = []
+        self._capture_store = Store[dict[str, Any]](
+            hass,
+            CAPTURE_STORAGE_VERSION,
+            CAPTURE_STORAGE_KEY,
+            private=True,
+            atomic_writes=True,
+        )
+        self._stored_capture_states: dict[str, bool] = {}
 
     @property
     def records(self) -> dict[str, AdapterPresence]:
@@ -446,9 +477,14 @@ class AntAdapterManager:
     ) -> AdapterPresence:
         record = self._records.get(adapter.stable_key)
         if record is None:
+            desired = (
+                bool(saved_capture)
+                if saved_capture is not None
+                else self._stored_capture_states.get(adapter.stable_key, False)
+            )
             record = AdapterPresence(
                 adapter=adapter,
-                capture_enabled=bool(saved_capture),
+                desired_capture=desired,
             )
             self._records[adapter.stable_key] = record
         else:
@@ -459,6 +495,15 @@ class AntAdapterManager:
         return record
 
     async def async_start(self) -> None:
+        stored = await self._capture_store.async_load()
+        if isinstance(stored, dict):
+            states = stored.get("states")
+            if isinstance(states, dict):
+                self._stored_capture_states = {
+                    str(key): bool(value)
+                    for key, value in states.items()
+                }
+
         for data in self._known_adapters().values():
             try:
                 adapter = AntUsbAdapter.from_mapping(data)
@@ -466,7 +511,7 @@ class AntAdapterManager:
                 continue
             self._ensure_record(
                 adapter,
-                saved_capture=False,
+                saved_capture=None,
             )
 
         await self.async_refresh_local()
@@ -508,9 +553,20 @@ class AntAdapterManager:
 
         scanner = self._local_scanners.get(stable_key)
 
-        if record.local_present and record.capture_enabled:
+        if record.local_present and record.desired_capture:
             if scanner is None:
-                scanner = LocalAdapterScanner(record.adapter, self.receiver)
+                scanner = LocalAdapterScanner(
+                    record.adapter,
+                    self.receiver,
+                    lambda enabled, error, key=stable_key: (
+                        self.hass.loop.call_soon_threadsafe(
+                            self._set_local_capture_state,
+                            key,
+                            enabled,
+                            error,
+                        )
+                    ),
+                )
                 self._local_scanners[stable_key] = scanner
             scanner.start()
             return
@@ -518,6 +574,50 @@ class AntAdapterManager:
         if scanner is not None:
             scanner.stop()
             self._local_scanners.pop(stable_key, None)
+
+    def _set_local_capture_state(
+        self,
+        stable_key: str,
+        enabled: bool,
+        error: str | None,
+    ) -> None:
+        record = self._records.get(stable_key)
+        if record is None:
+            return
+        previous = record.local_capture_enabled
+        record.local_capture_enabled = bool(enabled)
+        if error:
+            record.capture_error = error
+        elif enabled:
+            record.capture_error = None
+        if previous != bool(enabled) or error:
+            self._notify(stable_key)
+
+    def update_remote_capture_state(
+        self,
+        gateway_id: str,
+        stable_key: str,
+        enabled: bool,
+        error: str | None = None,
+    ) -> None:
+        record = self._records.get(stable_key)
+        if record is None:
+            return
+        if gateway_id not in (record.remote_gateways or {}):
+            return
+        previous = record.remote_capture_states.get(gateway_id, False)
+        record.remote_capture_states[gateway_id] = bool(enabled)
+        if error:
+            record.capture_error = error
+        elif enabled:
+            record.capture_error = None
+        if previous != bool(enabled) or error:
+            self._notify(stable_key)
+
+    async def _async_save_capture_states(self) -> None:
+        await self._capture_store.async_save(
+            {"states": dict(self._stored_capture_states)}
+        )
 
     def _send_remote_capture(
         self,
@@ -539,14 +639,17 @@ class AntAdapterManager:
         if record is None:
             return
 
-        record.capture_enabled = bool(enabled)
+        record.desired_capture = bool(enabled)
+        self._stored_capture_states[stable_key] = record.desired_capture
+        await self._async_save_capture_states()
+
         self._sync_local_capture(stable_key)
 
         for gateway_id in sorted(record.remote_gateways or {}):
             self._send_remote_capture(
                 stable_key,
                 gateway_id,
-                record.capture_enabled,
+                record.desired_capture,
             )
 
         self._notify(stable_key)
@@ -581,6 +684,7 @@ class AntAdapterManager:
 
             record.local_present = False
             record.local_missing_since = None
+            record.local_capture_enabled = False
             self._sync_local_capture(stable_key)
             self._notify(stable_key)
 
@@ -615,7 +719,7 @@ class AntAdapterManager:
                 self._send_remote_capture(
                     adapter.stable_key,
                     gateway_id,
-                    record.capture_enabled,
+                    record.desired_capture,
                 )
                 self._notify(adapter.stable_key)
 
@@ -636,6 +740,7 @@ class AntAdapterManager:
 
             for gateway_id in expired_gateways:
                 record.remote_missing_since.pop(gateway_id, None)
+                record.remote_capture_states.pop(gateway_id, None)
                 if gateway_id in (record.remote_gateways or {}):
                     record.remote_gateways.pop(gateway_id, None)
                     changed = True
@@ -653,6 +758,7 @@ class AntAdapterManager:
                 ):
                     record.remote_gateways.pop(gateway_id, None)
                     record.remote_missing_since.pop(gateway_id, None)
+                    record.remote_capture_states.pop(gateway_id, None)
                     changed = True
 
             if changed:

@@ -35,6 +35,7 @@ PACKET_EVENT = "antplus_remote_packet"
 HELLO_EVENT = "antplus_gateway_hello"
 STATUS_EVENT = "antplus_gateway_status"
 CAPTURE_EVENT = "antplus_adapter_capture"
+CAPTURE_STATE_EVENT = "antplus_adapter_capture_state"
 
 SUPPORTED_USB_IDS = {
     ("0FCF", "1008"),
@@ -214,10 +215,12 @@ class AntScanner:
         self,
         adapter: dict[str, Any],
         packet_queue: queue.Queue[dict[str, Any]],
+        state_queue: queue.Queue[dict[str, Any]],
     ) -> None:
         self.adapter = adapter
         self.adapter_id = stable_key(adapter)
         self.packet_queue = packet_queue
+        self.state_queue = state_queue
         self._node = None
         self._thread: threading.Thread | None = None
         self._enabled = False
@@ -248,6 +251,22 @@ class AntScanner:
                 node.stop()
             except Exception:
                 _LOGGER.debug("Error stopping ANT node", exc_info=True)
+
+    def _report_state(
+        self,
+        enabled: bool,
+        error: str | None = None,
+    ) -> None:
+        try:
+            self.state_queue.put_nowait(
+                {
+                    "adapter_id": self.adapter_id,
+                    "enabled": bool(enabled),
+                    "error": error,
+                }
+            )
+        except queue.Full:
+            _LOGGER.warning("Capture-state queue full for %s", self.adapter_id)
 
     def _on_data(self, data: Any) -> None:
         if not self._enabled or len(data) < 13:
@@ -295,11 +314,14 @@ class AntScanner:
             channel.open_rx_scan_mode()
 
             _LOGGER.info("Capture started on adapter %s", self.adapter_id)
+            self._report_state(True)
             node.start()
-        except Exception:
+        except Exception as err:
             _LOGGER.exception("Capture failed on adapter %s", self.adapter_id)
+            self._report_state(False, str(err))
         finally:
             self._node = None
+            self._report_state(False)
             _LOGGER.info("Capture stopped on adapter %s", self.adapter_id)
 
 
@@ -307,10 +329,12 @@ class HAConnection:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self.packet_queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=10000)
+        self.state_queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=1000)
         self.next_id = 1
         self._adapters: dict[str, dict[str, Any]] = {}
         self._scanners: dict[str, AntScanner] = {}
         self._desired: dict[str, bool] = {}
+        self._missing_since: dict[str, float] = {}
         self._last_status_sent = 0.0
 
     async def send(self, websocket, payload: dict[str, Any]) -> None:
@@ -350,7 +374,11 @@ class HAConnection:
             return
 
         if adapter_id not in self._scanners:
-            scanner = AntScanner(adapter, self.packet_queue)
+            scanner = AntScanner(
+                adapter,
+                self.packet_queue,
+                self.state_queue,
+            )
             self._scanners[adapter_id] = scanner
             scanner.start()
 
@@ -364,17 +392,30 @@ class HAConnection:
             except ValueError:
                 _LOGGER.warning("Ignoring ANT USB adapter without serial: %s", adapter)
 
-        changed = current != self._adapters
-        removed = set(self._adapters) - set(current)
-        self._adapters = current
+        now = time.monotonic()
+        previous = dict(self._adapters)
 
-        for adapter_id in removed:
+        for adapter_id in current:
+            self._missing_since.pop(adapter_id, None)
+
+        for adapter_id, adapter in previous.items():
+            if adapter_id in current:
+                continue
+
+            missing_since = self._missing_since.setdefault(adapter_id, now)
+            if now - missing_since <= 20.0:
+                current[adapter_id] = adapter
+                continue
+
+            self._missing_since.pop(adapter_id, None)
             self._stop_adapter(adapter_id)
+
+        changed = current != self._adapters
+        self._adapters = current
 
         for adapter_id in current:
             self._sync_adapter(adapter_id)
 
-        now = time.monotonic()
         if (
             not force
             and not changed
@@ -405,6 +446,26 @@ class HAConnection:
         while True:
             await self.refresh_adapters(websocket)
             await asyncio.sleep(USB_RESCAN_INTERVAL)
+
+    async def capture_state_sender(self, websocket) -> None:
+        while True:
+            await asyncio.sleep(0.1)
+            while True:
+                try:
+                    state = self.state_queue.get_nowait()
+                except queue.Empty:
+                    break
+                await self.send(
+                    websocket,
+                    {
+                        "type": "fire_event",
+                        "event_type": CAPTURE_STATE_EVENT,
+                        "event_data": {
+                            "gateway_id": self.settings.gateway_id,
+                            **state,
+                        },
+                    },
+                )
 
     async def packet_sender(self, websocket) -> None:
         while True:
@@ -463,6 +524,9 @@ class HAConnection:
 
             packet_task = asyncio.create_task(self.packet_sender(websocket))
             status_task = asyncio.create_task(self.status_loop(websocket))
+            capture_state_task = asyncio.create_task(
+                self.capture_state_sender(websocket)
+            )
 
             try:
                 async for raw in websocket:
@@ -493,7 +557,12 @@ class HAConnection:
             finally:
                 packet_task.cancel()
                 status_task.cancel()
-                for task in (packet_task, status_task):
+                capture_state_task.cancel()
+                for task in (
+                    packet_task,
+                    status_task,
+                    capture_state_task,
+                ):
                     try:
                         await task
                     except asyncio.CancelledError:

@@ -79,6 +79,9 @@ class AntUsbAdapterCaptureSwitch(SwitchEntity):
             "connection": record.connection,
             "local": record.local_present,
             "remote_gateways": sorted(record.remote_gateways or {}),
+            "desired_capture": record.desired_capture,
+            "confirmed_capture": record.capture_enabled,
+            "capture_error": record.capture_error,
         }
 
     @property

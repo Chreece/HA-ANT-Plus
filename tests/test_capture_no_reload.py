@@ -9,7 +9,7 @@ def test_capture_toggle_does_not_persist_config_entry():
     body = source[start:end]
 
     assert "_persist_record(record)" not in body
-    assert "record.capture_enabled = bool(enabled)" in body
+    assert "record.desired_capture = bool(enabled)" in body
 
 
 def test_persisted_adapter_data_excludes_capture_state():
