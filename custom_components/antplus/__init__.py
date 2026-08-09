@@ -19,7 +19,7 @@ async def async_setup_entry(
 ) -> bool:
     """Set up HA ANT+."""
     receiver = AntPlusReceiver()
-    adapter_manager = AntAdapterManager(hass, entry)
+    adapter_manager = AntAdapterManager(hass, entry, receiver)
     receiver.adapter_manager = adapter_manager
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = receiver
@@ -37,9 +37,6 @@ async def async_setup_entry(
         )
     )
 
-    # Optional local transport. Missing local USB is a normal remote-only state.
-    await hass.async_add_executor_job(receiver.start, False)
-
     await hass.config_entries.async_forward_entry_setups(
         entry,
         PLATFORMS,
@@ -56,7 +53,6 @@ async def _async_options_updated(
     hass: HomeAssistant,
     entry: ConfigEntry,
 ) -> None:
-    """Reload after option changes."""
     await hass.config_entries.async_reload(entry.entry_id)
 
 
@@ -64,7 +60,6 @@ async def async_unload_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
 ) -> bool:
-    """Unload HA ANT+."""
     unloaded = await hass.config_entries.async_unload_platforms(
         entry,
         PLATFORMS,
@@ -73,8 +68,8 @@ async def async_unload_entry(
     if not unloaded:
         return False
 
-    receiver: AntPlusReceiver = hass.data[DOMAIN].pop(entry.entry_id)
-    await hass.async_add_executor_job(receiver.stop)
+    receiver = hass.data[DOMAIN].pop(entry.entry_id)
+    receiver.adapter_manager.stop()
 
     if not hass.data[DOMAIN]:
         hass.data.pop(DOMAIN)
@@ -86,7 +81,7 @@ async def async_cleanup_legacy_entities(
     hass: HomeAssistant,
     entry: ConfigEntry,
 ) -> None:
-    """Remove obsolete entities and the old HA ANT+ hub device."""
+    """Remove old hub/global capture entities; physical devices stay."""
     entity_registry = er.async_get(hass)
     device_registry = dr.async_get(hass)
 
@@ -109,13 +104,9 @@ async def async_cleanup_legacy_entities(
     }
 
     obsolete_unique_ids = {
+        "antplus_capture",
         "antplus_capture_status",
         "antplus_capture_last_error",
-    }
-
-    device_less_unique_ids = {
-        "antplus_capture",
-        "antplus_decoder_coverage",
     }
 
     for entity in list(entity_registry.entities.values()):
@@ -123,19 +114,11 @@ async def async_cleanup_legacy_entities(
             continue
 
         unique_id = entity.unique_id or ""
-
         if (
             unique_id in obsolete_unique_ids
             or any(unique_id.endswith(suffix) for suffix in unwanted_suffixes)
         ):
             entity_registry.async_remove(entity.entity_id)
-            continue
-
-        if unique_id in device_less_unique_ids and entity.device_id is not None:
-            entity_registry.async_update_entity(
-                entity.entity_id,
-                device_id=None,
-            )
 
     hub = device_registry.async_get_device_by_identifier(
         (DOMAIN, "hub"),

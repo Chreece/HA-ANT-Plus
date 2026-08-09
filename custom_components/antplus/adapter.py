@@ -1,4 +1,4 @@
-"""Physical ANT USB adapter identity, presence and registry management."""
+"""Physical ANT USB adapter identity, presence and per-adapter capture."""
 
 from __future__ import annotations
 
@@ -8,8 +8,12 @@ from datetime import timedelta
 import hashlib
 import logging
 from pathlib import Path
+import threading
 import time
 from typing import Any
+
+from openant.devices import ANTPLUS_NETWORK_KEY
+from openant.easy.channel import Channel
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -17,7 +21,8 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import async_track_time_interval
 
-from .const import DOMAIN
+from .const import DOMAIN, REMOTE_ADAPTER_CAPTURE_EVENT
+from .usb_selected import create_selected_node
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -25,6 +30,9 @@ SUPPORTED_USB_IDS = {
     ("0FCF", "1008"),
     ("0FCF", "1009"),
 }
+
+ANTPLUS_NETWORK_NUMBER = 0
+ANTPLUS_RF_FREQUENCY = 57
 
 KNOWN_ADAPTERS_KEY = "known_adapters"
 LEGACY_ADAPTER_IDENTIFIER = (DOMAIN, "usb_adapter")
@@ -53,15 +61,14 @@ class AntUsbAdapter:
         self.vid = self.vid.upper().zfill(4)
         self.pid = self.pid.upper().zfill(4)
         if self.serial is not None:
-            self.serial = self.serial.strip() or None
+            self.serial = self.serial.rstrip("\x00").strip() or None
         if self.manufacturer is not None:
-            self.manufacturer = self.manufacturer.strip() or None
+            self.manufacturer = self.manufacturer.rstrip("\x00").strip() or None
         if self.product is not None:
-            self.product = self.product.strip() or None
+            self.product = self.product.rstrip("\x00").strip() or None
 
     @property
     def stable_key(self) -> str:
-        """Return a physical-device key which survives host changes."""
         if self.serial:
             return f"{self.vid}:{self.pid}:{self.serial}"
 
@@ -90,8 +97,7 @@ class AntUsbAdapter:
             return f"{base} {self.serial}"
         return base
 
-    def as_storage(self) -> dict[str, Any]:
-        """Return identity metadata only; transport location is runtime state."""
+    def identity_storage(self) -> dict[str, Any]:
         return {
             "vid": self.vid,
             "pid": self.pid,
@@ -116,11 +122,10 @@ class AntUsbAdapter:
 
 @dataclass(slots=True)
 class AdapterPresence:
-    """Runtime presence for one physical adapter."""
-
     adapter: AntUsbAdapter
     local_present: bool = False
     remote_gateways: dict[str, float] | None = None
+    capture_enabled: bool = False
 
     def __post_init__(self) -> None:
         if self.remote_gateways is None:
@@ -144,8 +149,7 @@ class AdapterPresence:
     @property
     def connection(self) -> str:
         if self.local_present and self.remote_gateways:
-            gateways = ", ".join(sorted(self.remote_gateways))
-            return f"Local + {gateways}"
+            return "Local + " + ", ".join(sorted(self.remote_gateways))
         if self.local_present:
             return "Local"
         if self.remote_gateways:
@@ -154,7 +158,6 @@ class AdapterPresence:
 
 
 def scan_linux_ant_adapters() -> list[AntUsbAdapter]:
-    """Find all supported ANT USB adapters through Linux sysfs."""
     adapters: list[AntUsbAdapter] = []
     root = Path("/sys/bus/usb/devices")
 
@@ -193,20 +196,122 @@ def scan_linux_ant_adapters() -> list[AntUsbAdapter]:
     return adapters
 
 
-class AntAdapterManager:
-    """Track physical ANT USB adapters independently of transport location."""
+class LocalAdapterScanner:
+    """One OpenANT scan node bound to one physical local USB adapter."""
 
-    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+    def __init__(self, adapter: AntUsbAdapter, receiver) -> None:
+        self.adapter = adapter
+        self.receiver = receiver
+        self._thread: threading.Thread | None = None
+        self._node = None
+        self._lock = threading.RLock()
+        self._enabled = False
+
+    @property
+    def running(self) -> bool:
+        thread = self._thread
+        return bool(self._enabled and thread and thread.is_alive())
+
+    def start(self) -> None:
+        with self._lock:
+            self._enabled = True
+            if self._thread and self._thread.is_alive():
+                return
+            self._thread = threading.Thread(
+                target=self._run,
+                name=f"antplus-{self.adapter.serial or self.adapter.pid}",
+                daemon=True,
+            )
+            self._thread.start()
+
+    def stop(self) -> None:
+        with self._lock:
+            self._enabled = False
+            node = self._node
+        if node is not None:
+            try:
+                node.stop()
+            except Exception:
+                _LOGGER.debug(
+                    "Error stopping local ANT+ adapter %s",
+                    self.adapter.stable_key,
+                    exc_info=True,
+                )
+
+    def _on_data(self, data: Any) -> None:
+        if not self._enabled or len(data) < 13:
+            return
+        self.receiver.process_packet(
+            device_id=int(data[9]) | (int(data[10]) << 8),
+            device_type=int(data[11]),
+            transmission_type=int(data[12]),
+            payload=bytes(int(value) & 0xFF for value in data[:8]),
+            source=f"local:{self.adapter.stable_key}",
+        )
+
+    def _run(self) -> None:
+        try:
+            node = create_selected_node(
+                self.adapter.vid,
+                self.adapter.pid,
+                self.adapter.serial,
+            )
+            self._node = node
+            node.set_network_key(
+                ANTPLUS_NETWORK_NUMBER,
+                ANTPLUS_NETWORK_KEY,
+            )
+
+            channel = node.new_channel(
+                Channel.Type.BIDIRECTIONAL_RECEIVE,
+                ANTPLUS_NETWORK_NUMBER,
+                0x01,
+            )
+            channel.on_broadcast_data = self._on_data
+            channel.on_burst_data = self._on_data
+            channel.on_acknowledge = self._on_data
+            channel.set_id(0, 0, 0)
+            channel.enable_extended_messages(1)
+            channel.set_rf_freq(ANTPLUS_RF_FREQUENCY)
+            channel.open_rx_scan_mode()
+
+            _LOGGER.info(
+                "Capture started on local ANT USB adapter %s",
+                self.adapter.stable_key,
+            )
+            node.start()
+        except Exception:
+            _LOGGER.exception(
+                "Capture failed on local ANT USB adapter %s",
+                self.adapter.stable_key,
+            )
+        finally:
+            self._node = None
+            _LOGGER.info(
+                "Capture stopped on local ANT USB adapter %s",
+                self.adapter.stable_key,
+            )
+
+
+class AntAdapterManager:
+    """Track physical adapters and route capture commands to that adapter."""
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, receiver) -> None:
         self.hass = hass
         self.entry = entry
+        self.receiver = receiver
         self._records: dict[str, AdapterPresence] = {}
         self._callbacks: list[AdapterCallback] = []
         self._remote_gateway_last_seen: dict[str, float] = {}
+        self._local_scanners: dict[str, LocalAdapterScanner] = {}
         self._unsubs: list[Callable[[], None]] = []
 
     @property
     def records(self) -> dict[str, AdapterPresence]:
         return self._records
+
+    def get(self, stable_key: str) -> AdapterPresence | None:
+        return self._records.get(stable_key)
 
     def add_callback(self, callback: AdapterCallback) -> Callable[[], None]:
         self._callbacks.append(callback)
@@ -218,9 +323,6 @@ class AntAdapterManager:
                 pass
 
         return remove
-
-    def get(self, stable_key: str) -> AdapterPresence | None:
-        return self._records.get(stable_key)
 
     def _notify(self, stable_key: str) -> None:
         for callback in tuple(self._callbacks):
@@ -239,21 +341,21 @@ class AntAdapterManager:
             if isinstance(value, dict)
         }
 
-    def _persist_adapter(self, adapter: AntUsbAdapter) -> None:
+    def _persist_record(self, record: AdapterPresence) -> None:
         known = self._known_adapters()
-        stored = adapter.as_storage()
+        stored = record.adapter.identity_storage()
+        stored["capture_enabled"] = record.capture_enabled
 
-        if known.get(adapter.stable_key) == stored:
+        if known.get(record.adapter.stable_key) == stored:
             return
 
-        known[adapter.stable_key] = stored
+        known[record.adapter.stable_key] = stored
         self.hass.config_entries.async_update_entry(
             self.entry,
             data={**self.entry.data, KNOWN_ADAPTERS_KEY: known},
         )
 
     def _merge_or_register_device(self, adapter: AntUsbAdapter) -> None:
-        """Create the physical device or merge the old generic adapter into it."""
         device_registry = dr.async_get(self.hass)
         entity_registry = er.async_get(self.hass)
 
@@ -268,10 +370,6 @@ class AntAdapterManager:
         )
 
         if physical is None and legacy is not None:
-            _LOGGER.info(
-                "Migrating legacy ANT+ USB adapter to physical identity %s",
-                adapter.stable_key,
-            )
             device_registry.async_update_device(
                 legacy.id,
                 new_identifiers={identifier},
@@ -307,62 +405,45 @@ class AntAdapterManager:
             LEGACY_ADAPTER_IDENTIFIER,
             self.entry.entry_id,
         )
-        if (
-            legacy is not None
-            and physical is not None
-            and legacy.id != physical.id
-        ):
-            _LOGGER.info(
-                "Merging duplicate legacy ANT+ USB adapter %s into %s",
-                legacy.id,
-                physical.id,
-            )
-
+        if legacy is not None and physical is not None and legacy.id != physical.id:
             for entity in list(entity_registry.entities.values()):
                 if entity.device_id == legacy.id:
                     entity_registry.async_update_entity(
                         entity.entity_id,
                         device_id=physical.id,
                     )
-
-            changes: dict[str, Any] = {}
-            if physical.area_id is None and legacy.area_id is not None:
-                changes["area_id"] = legacy.area_id
-
-            legacy_name_by_user = getattr(legacy, "name_by_user", None)
-            physical_name_by_user = getattr(physical, "name_by_user", None)
-            if physical_name_by_user is None and legacy_name_by_user:
-                changes["name_by_user"] = legacy_name_by_user
-
-            if changes:
-                device_registry.async_update_device(
-                    physical.id,
-                    **changes,
-                )
-
             device_registry.async_remove_device(legacy.id)
 
-    def _ensure_record(self, adapter: AntUsbAdapter) -> AdapterPresence:
+    def _ensure_record(
+        self,
+        adapter: AntUsbAdapter,
+        *,
+        saved_capture: bool | None = None,
+    ) -> AdapterPresence:
         record = self._records.get(adapter.stable_key)
-
         if record is None:
-            record = AdapterPresence(adapter=adapter)
+            record = AdapterPresence(
+                adapter=adapter,
+                capture_enabled=bool(saved_capture),
+            )
             self._records[adapter.stable_key] = record
         else:
             record.adapter = adapter
 
         self._merge_or_register_device(adapter)
-        self._persist_adapter(adapter)
+        self._persist_record(record)
         return record
 
     async def async_start(self) -> None:
-        """Load remembered adapters and start local/remote presence maintenance."""
         for data in self._known_adapters().values():
             try:
                 adapter = AntUsbAdapter.from_mapping(data)
             except (KeyError, TypeError, ValueError):
                 continue
-            self._ensure_record(adapter)
+            self._ensure_record(
+                adapter,
+                saved_capture=bool(data.get("capture_enabled", False)),
+            )
 
         await self.async_refresh_local()
 
@@ -382,6 +463,10 @@ class AntAdapterManager:
         )
 
     def stop(self) -> None:
+        for scanner in tuple(self._local_scanners.values()):
+            scanner.stop()
+        self._local_scanners.clear()
+
         for unsub in self._unsubs:
             unsub()
         self._unsubs.clear()
@@ -392,8 +477,58 @@ class AntAdapterManager:
     async def _async_expire_tick(self, _now) -> None:
         self.expire_remote_gateways()
 
+    def _sync_local_capture(self, stable_key: str) -> None:
+        record = self._records.get(stable_key)
+        if record is None:
+            return
+
+        scanner = self._local_scanners.get(stable_key)
+
+        if record.local_present and record.capture_enabled:
+            if scanner is None:
+                scanner = LocalAdapterScanner(record.adapter, self.receiver)
+                self._local_scanners[stable_key] = scanner
+            scanner.start()
+            return
+
+        if scanner is not None:
+            scanner.stop()
+            self._local_scanners.pop(stable_key, None)
+
+    def _send_remote_capture(
+        self,
+        stable_key: str,
+        gateway_id: str,
+        enabled: bool,
+    ) -> None:
+        self.hass.bus.async_fire(
+            REMOTE_ADAPTER_CAPTURE_EVENT,
+            {
+                "gateway_id": gateway_id,
+                "adapter_id": stable_key,
+                "enabled": enabled,
+            },
+        )
+
+    async def async_set_capture(self, stable_key: str, enabled: bool) -> None:
+        record = self._records.get(stable_key)
+        if record is None:
+            return
+
+        record.capture_enabled = bool(enabled)
+        self._persist_record(record)
+        self._sync_local_capture(stable_key)
+
+        for gateway_id in sorted(record.remote_gateways or {}):
+            self._send_remote_capture(
+                stable_key,
+                gateway_id,
+                record.capture_enabled,
+            )
+
+        self._notify(stable_key)
+
     async def async_refresh_local(self) -> None:
-        """Refresh physical adapters attached to the Home Assistant host."""
         adapters = await self.hass.async_add_executor_job(
             scan_linux_ant_adapters
         )
@@ -403,20 +538,14 @@ class AntAdapterManager:
             record = self._ensure_record(adapter)
             changed = not record.local_present
             record.local_present = True
+            self._sync_local_capture(adapter.stable_key)
             if changed:
-                _LOGGER.info(
-                    "ANT+ USB adapter %s is available locally",
-                    adapter.stable_key,
-                )
                 self._notify(adapter.stable_key)
 
         for stable_key, record in self._records.items():
             if record.local_present and stable_key not in present_keys:
                 record.local_present = False
-                _LOGGER.info(
-                    "ANT+ USB adapter %s is no longer available locally",
-                    stable_key,
-                )
+                self._sync_local_capture(stable_key)
                 self._notify(stable_key)
 
     def update_remote_gateway(
@@ -424,10 +553,8 @@ class AntAdapterManager:
         gateway_id: str,
         adapters: list[AntUsbAdapter],
     ) -> None:
-        """Apply one complete heartbeat/status snapshot from a gateway."""
         now = time.monotonic()
         self._remote_gateway_last_seen[gateway_id] = now
-
         current_keys = {adapter.stable_key for adapter in adapters}
 
         for stable_key, record in self._records.items():
@@ -436,30 +563,24 @@ class AntAdapterManager:
                 and stable_key not in current_keys
             ):
                 record.remote_gateways.pop(gateway_id, None)
-                _LOGGER.info(
-                    "ANT+ USB adapter %s disappeared from gateway %s",
-                    stable_key,
-                    gateway_id,
-                )
                 self._notify(stable_key)
 
         for adapter in adapters:
             adapter.source = "remote"
             adapter.gateway_id = gateway_id
             record = self._ensure_record(adapter)
-            was_present = gateway_id in (record.remote_gateways or {})
+            new_presence = gateway_id not in (record.remote_gateways or {})
             record.remote_gateways[gateway_id] = now
 
-            if not was_present:
-                _LOGGER.info(
-                    "ANT+ USB adapter %s is available via gateway %s",
+            if new_presence:
+                self._send_remote_capture(
                     adapter.stable_key,
                     gateway_id,
+                    record.capture_enabled,
                 )
                 self._notify(adapter.stable_key)
 
     def expire_remote_gateways(self) -> None:
-        """Expire gateways which stopped heartbeating."""
         now = time.monotonic()
         expired = {
             gateway_id
@@ -480,8 +601,4 @@ class AntAdapterManager:
                     record.remote_gateways.pop(gateway_id, None)
                     changed = True
             if changed:
-                _LOGGER.info(
-                    "ANT+ USB adapter %s became unavailable via expired gateway",
-                    stable_key,
-                )
                 self._notify(stable_key)

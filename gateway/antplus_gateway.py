@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Remote ANT+ gateway for HA ANT+."""
+"""Remote ANT+ gateway with per-physical-adapter capture."""
 
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 import json
 import logging
 import os
@@ -16,7 +17,13 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
 
+import usb.core
+import usb.util
 import websockets
+
+from openant.base import ant as ant_module
+from openant.base import driver as driver_module
+from openant.base.driver import USB2Driver, USB3Driver
 from openant.devices import ANTPLUS_NETWORK_KEY
 from openant.easy.channel import Channel
 from openant.easy.node import Node
@@ -27,7 +34,7 @@ ANTPLUS_RF_FREQUENCY = 57
 PACKET_EVENT = "antplus_remote_packet"
 HELLO_EVENT = "antplus_gateway_hello"
 STATUS_EVENT = "antplus_gateway_status"
-CAPTURE_STATE_EVENT = "antplus_capture_state"
+CAPTURE_EVENT = "antplus_adapter_capture"
 
 SUPPORTED_USB_IDS = {
     ("0FCF", "1008"),
@@ -38,6 +45,7 @@ USB_RESCAN_INTERVAL = 5.0
 HEARTBEAT_INTERVAL = 15.0
 
 _LOGGER = logging.getLogger("ha_antplus_gateway")
+_NODE_CREATE_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -72,20 +80,84 @@ def load_settings() -> Settings:
 
 def websocket_url(ha_url: str) -> str:
     parsed = urlparse(ha_url)
-    if parsed.scheme == "http":
-        scheme = "ws"
-    elif parsed.scheme == "https":
-        scheme = "wss"
-    else:
+    scheme = "ws" if parsed.scheme == "http" else "wss"
+    if parsed.scheme not in ("http", "https"):
         raise ValueError("HA_URL must begin with http:// or https://")
     return f"{scheme}://{parsed.netloc}{parsed.path.rstrip('/')}/api/websocket"
 
 
+def _usb_serial(device) -> str | None:
+    try:
+        if not device.iSerialNumber:
+            return None
+        value = usb.util.get_string(device, device.iSerialNumber)
+    except Exception:
+        return None
+    if value is None:
+        return None
+    return str(value).rstrip("\x00").strip() or None
+
+
+class _SerialSelectedMixin:
+    TARGET_SERIAL: str | None = None
+
+    def open(self) -> None:
+        original_find = driver_module.usb.core.find
+        serial = self.TARGET_SERIAL
+
+        def selected_find(*args, **kwargs):
+            devices = original_find(
+                idVendor=kwargs.get("idVendor", self.ID_VENDOR),
+                idProduct=kwargs.get("idProduct", self.ID_PRODUCT),
+                find_all=True,
+            )
+            if devices is None:
+                return None
+            for device in devices:
+                if serial is None or _usb_serial(device) == serial:
+                    return device
+            return None
+
+        driver_module.usb.core.find = selected_find
+        try:
+            super().open()
+        finally:
+            driver_module.usb.core.find = original_find
+
+
+class SerialUSB2Driver(_SerialSelectedMixin, USB2Driver):
+    pass
+
+
+class SerialUSB3Driver(_SerialSelectedMixin, USB3Driver):
+    pass
+
+
+@contextmanager
+def _selected_driver(pid: str, serial: str | None):
+    pid_int = int(pid, 16)
+    driver_cls = SerialUSB2Driver if pid_int == USB2Driver.ID_PRODUCT else SerialUSB3Driver
+
+    class SelectedDriver(driver_cls):
+        TARGET_SERIAL = serial
+
+    original = ant_module.find_driver
+    ant_module.find_driver = lambda: SelectedDriver()
+    try:
+        yield
+    finally:
+        ant_module.find_driver = original
+
+
+def create_selected_node(pid: str, serial: str | None) -> Node:
+    with _NODE_CREATE_LOCK:
+        with _selected_driver(pid, serial):
+            return Node()
+
+
 def detect_ant_adapters() -> list[dict[str, Any]]:
-    """Return all supported ANT USB adapters in Linux sysfs."""
     result: list[dict[str, Any]] = []
     root = Path("/sys/bus/usb/devices")
-
     if not root.exists():
         return result
 
@@ -101,10 +173,9 @@ def detect_ant_adapters() -> list[dict[str, Any]]:
 
         def read_optional(name: str) -> str | None:
             try:
-                value = (device_path / name).read_text().strip()
+                return (device_path / name).read_text().strip() or None
             except (OSError, UnicodeError):
                 return None
-            return value or None
 
         result.append(
             {
@@ -116,38 +187,33 @@ def detect_ant_adapters() -> list[dict[str, Any]]:
                 "path": str(device_path),
             }
         )
-
     return result
 
 
-def adapter_identity(adapter: dict[str, Any]) -> tuple[Any, ...]:
-    return (
-        adapter.get("vid"),
-        adapter.get("pid"),
-        adapter.get("serial"),
-        adapter.get("manufacturer"),
-        adapter.get("product"),
-        adapter.get("path"),
-    )
+def stable_key(adapter: dict[str, Any]) -> str:
+    serial = adapter.get("serial")
+    if not serial:
+        raise ValueError("Remote per-adapter capture requires a USB serial number")
+    return f"{adapter['vid'].upper()}:{adapter['pid'].upper()}:{str(serial).strip()}"
 
 
 class AntScanner:
-    def __init__(self, packet_queue: queue.Queue[dict[str, Any]]) -> None:
+    def __init__(
+        self,
+        adapter: dict[str, Any],
+        packet_queue: queue.Queue[dict[str, Any]],
+    ) -> None:
+        self.adapter = adapter
+        self.adapter_id = stable_key(adapter)
         self.packet_queue = packet_queue
-        self._lock = threading.RLock()
+        self._node = None
         self._thread: threading.Thread | None = None
-        self._node: Node | None = None
         self._enabled = False
+        self._lock = threading.RLock()
 
     @property
     def enabled(self) -> bool:
         return self._enabled
-
-    def set_enabled(self, enabled: bool) -> None:
-        if enabled:
-            self.start()
-        else:
-            self.stop()
 
     def start(self) -> None:
         with self._lock:
@@ -156,7 +222,7 @@ class AntScanner:
                 return
             self._thread = threading.Thread(
                 target=self._run,
-                name="antplus-gateway-receiver",
+                name=f"antplus-{self.adapter.get('serial') or self.adapter['pid']}",
                 daemon=True,
             )
             self._thread.start()
@@ -165,7 +231,7 @@ class AntScanner:
         with self._lock:
             self._enabled = False
             node = self._node
-        if node:
+        if node is not None:
             try:
                 node.stop()
             except Exception:
@@ -174,14 +240,13 @@ class AntScanner:
     def _on_data(self, data: Any) -> None:
         if not self._enabled or len(data) < 13:
             return
-
         packet = {
+            "adapter_id": self.adapter_id,
             "device_id": int(data[9]) | (int(data[10]) << 8),
             "device_type": int(data[11]),
             "transmission_type": int(data[12]),
             "payload": bytes(int(value) & 0xFF for value in data[:8]).hex(),
         }
-
         try:
             self.packet_queue.put_nowait(packet)
         except queue.Full:
@@ -189,7 +254,10 @@ class AntScanner:
 
     def _run(self) -> None:
         try:
-            node = Node()
+            node = create_selected_node(
+                self.adapter["pid"],
+                self.adapter.get("serial"),
+            )
             self._node = node
             node.set_network_key(ANTPLUS_NETWORK_NUMBER, ANTPLUS_NETWORK_KEY)
 
@@ -206,29 +274,23 @@ class AntScanner:
             channel.set_rf_freq(ANTPLUS_RF_FREQUENCY)
             channel.open_rx_scan_mode()
 
-            _LOGGER.info("ANT+ gateway capture started")
+            _LOGGER.info("Capture started on adapter %s", self.adapter_id)
             node.start()
-
-        except Exception as err:
-            _LOGGER.exception("ANT+ scanner error: %s", err)
+        except Exception:
+            _LOGGER.exception("Capture failed on adapter %s", self.adapter_id)
         finally:
             self._node = None
-            _LOGGER.info("ANT+ gateway capture stopped")
+            _LOGGER.info("Capture stopped on adapter %s", self.adapter_id)
 
 
 class HAConnection:
-    def __init__(
-        self,
-        settings: Settings,
-        scanner: AntScanner,
-        packet_queue: queue.Queue[dict[str, Any]],
-    ) -> None:
+    def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self.scanner = scanner
-        self.packet_queue = packet_queue
+        self.packet_queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=10000)
         self.next_id = 1
-        self.capture_known = False
-        self._adapters: list[dict[str, Any]] = []
+        self._adapters: dict[str, dict[str, Any]] = {}
+        self._scanners: dict[str, AntScanner] = {}
+        self._desired: dict[str, bool] = {}
         self._last_status_sent = 0.0
 
     async def send(self, websocket, payload: dict[str, Any]) -> None:
@@ -241,7 +303,6 @@ class HAConnection:
         message = json.loads(await websocket.recv())
         if message.get("type") != "auth_required":
             raise RuntimeError("Unexpected HA WebSocket handshake")
-
         await websocket.send(
             json.dumps(
                 {
@@ -250,22 +311,50 @@ class HAConnection:
                 }
             )
         )
-
         message = json.loads(await websocket.recv())
         if message.get("type") != "auth_ok":
             raise RuntimeError("Home Assistant authentication failed")
-
         _LOGGER.info("Authenticated with Home Assistant")
 
-    async def send_status(self, websocket, *, force: bool = False) -> None:
-        now = time.monotonic()
+    def _stop_adapter(self, adapter_id: str) -> None:
+        scanner = self._scanners.pop(adapter_id, None)
+        if scanner is not None:
+            scanner.stop()
+
+    def _sync_adapter(self, adapter_id: str) -> None:
+        adapter = self._adapters.get(adapter_id)
+        desired = self._desired.get(adapter_id, False)
+
+        if adapter is None or not desired:
+            self._stop_adapter(adapter_id)
+            return
+
+        if adapter_id not in self._scanners:
+            scanner = AntScanner(adapter, self.packet_queue)
+            self._scanners[adapter_id] = scanner
+            scanner.start()
+
+    async def refresh_adapters(self, websocket, *, force: bool = False) -> None:
         loop = asyncio.get_running_loop()
-        adapters = await loop.run_in_executor(None, detect_ant_adapters)
+        detected = await loop.run_in_executor(None, detect_ant_adapters)
+        current = {}
+        for adapter in detected:
+            try:
+                current[stable_key(adapter)] = adapter
+            except ValueError:
+                _LOGGER.warning("Ignoring ANT USB adapter without serial: %s", adapter)
 
-        old_identity = [adapter_identity(item) for item in self._adapters]
-        new_identity = [adapter_identity(item) for item in adapters]
-        changed = old_identity != new_identity
+        changed = current != self._adapters
+        removed = set(self._adapters) - set(current)
+        self._adapters = current
 
+        for adapter_id in removed:
+            self._stop_adapter(adapter_id)
+
+        for adapter_id in current:
+            self._sync_adapter(adapter_id)
+
+        now = time.monotonic()
         if (
             not force
             and not changed
@@ -273,9 +362,7 @@ class HAConnection:
         ):
             return
 
-        self._adapters = adapters
         self._last_status_sent = now
-
         await self.send(
             websocket,
             {
@@ -283,43 +370,31 @@ class HAConnection:
                 "event_type": STATUS_EVENT,
                 "event_data": {
                     "gateway_id": self.settings.gateway_id,
-                    "adapters": adapters,
+                    "adapters": list(current.values()),
                 },
             },
         )
 
         if changed:
-            description = ", ".join(
-                f"{item['vid']}:{item['pid']} serial={item.get('serial') or '<none>'}"
-                for item in adapters
-            ) or "none"
-
-            _LOGGER.info("ANT USB adapters changed: %s", description)
-
-            if not adapters:
-                self.scanner.set_enabled(False)
-            elif self.capture_known and not self.scanner.enabled:
-                self.scanner.set_enabled(True)
+            _LOGGER.info(
+                "ANT USB adapters: %s",
+                ", ".join(sorted(current)) or "none",
+            )
 
     async def status_loop(self, websocket) -> None:
         while True:
-            await self.send_status(websocket)
+            await self.refresh_adapters(websocket)
             await asyncio.sleep(USB_RESCAN_INTERVAL)
 
     async def packet_sender(self, websocket) -> None:
         while True:
             await asyncio.sleep(self.settings.batch_interval)
-
-            if not self.capture_known or not self.scanner.enabled:
-                continue
-
             packets: list[dict[str, Any]] = []
             while len(packets) < 250:
                 try:
                     packets.append(self.packet_queue.get_nowait())
                 except queue.Empty:
                     break
-
             if packets:
                 await self.send(
                     websocket,
@@ -342,19 +417,17 @@ class HAConnection:
             ping_timeout=20,
         ) as websocket:
             await self.authenticate(websocket)
-
-            self.capture_known = False
-            self.scanner.set_enabled(False)
-            loop = asyncio.get_running_loop()
-            self._adapters = await loop.run_in_executor(None, detect_ant_adapters)
+            self._desired.clear()
 
             await self.send(
                 websocket,
                 {
                     "type": "subscribe_events",
-                    "event_type": CAPTURE_STATE_EVENT,
+                    "event_type": CAPTURE_EVENT,
                 },
             )
+
+            await self.refresh_adapters(websocket, force=True)
 
             await self.send(
                 websocket,
@@ -363,13 +436,10 @@ class HAConnection:
                     "event_type": HELLO_EVENT,
                     "event_data": {
                         "gateway_id": self.settings.gateway_id,
-                        "adapters": self._adapters,
+                        "adapters": list(self._adapters.values()),
                     },
                 },
             )
-
-            self._last_status_sent = 0.0
-            await self.send_status(websocket, force=True)
 
             packet_task = asyncio.create_task(self.packet_sender(websocket))
             status_task = asyncio.create_task(self.status_loop(websocket))
@@ -377,31 +447,29 @@ class HAConnection:
             try:
                 async for raw in websocket:
                     message = json.loads(raw)
-
                     if message.get("type") != "event":
                         continue
 
                     event = message.get("event") or {}
-                    if event.get("event_type") != CAPTURE_STATE_EVENT:
+                    if event.get("event_type") != CAPTURE_EVENT:
                         continue
 
                     data = event.get("data") or {}
-                    target = data.get("gateway_id")
-                    if target and target != self.settings.gateway_id:
+                    if data.get("gateway_id") != self.settings.gateway_id:
+                        continue
+
+                    adapter_id = str(data.get("adapter_id", "")).strip()
+                    if not adapter_id:
                         continue
 
                     enabled = bool(data.get("enabled", False))
-                    self.capture_known = True
-
-                    should_run = enabled and bool(self._adapters)
-
+                    self._desired[adapter_id] = enabled
                     _LOGGER.info(
-                        "Global Capture -> %s",
+                        "Capture %s -> %s",
+                        adapter_id,
                         "ON" if enabled else "OFF",
                     )
-
-                    self.scanner.set_enabled(should_run)
-
+                    self._sync_adapter(adapter_id)
             finally:
                 packet_task.cancel()
                 status_task.cancel()
@@ -410,6 +478,8 @@ class HAConnection:
                         await task
                     except asyncio.CancelledError:
                         pass
+                for adapter_id in list(self._scanners):
+                    self._stop_adapter(adapter_id)
 
     async def run_forever(self) -> None:
         while True:
@@ -420,22 +490,16 @@ class HAConnection:
             except Exception as err:
                 _LOGGER.warning("HA connection lost: %s", err)
 
-            self.scanner.set_enabled(False)
+            for adapter_id in list(self._scanners):
+                self._stop_adapter(adapter_id)
+
             await asyncio.sleep(self.settings.reconnect_delay)
 
 
 async def amain() -> None:
     settings = load_settings()
-    packet_queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=10000)
-    scanner = AntScanner(packet_queue)
-
     _LOGGER.info("Starting HA ANT+ gateway %s", settings.gateway_id)
-
-    await HAConnection(
-        settings,
-        scanner,
-        packet_queue,
-    ).run_forever()
+    await HAConnection(settings).run_forever()
 
 
 if __name__ == "__main__":
@@ -443,7 +507,6 @@ if __name__ == "__main__":
         level=os.environ.get("LOG_LEVEL", "INFO").upper(),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-
     try:
         asyncio.run(amain())
     except KeyboardInterrupt:

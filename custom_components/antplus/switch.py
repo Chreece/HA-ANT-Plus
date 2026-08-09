@@ -1,14 +1,15 @@
-"""Switch platform for global HA ANT+ capture."""
+"""Switch platform for per-physical-adapter ANT+ capture."""
 
 from __future__ import annotations
 
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from .adapter import AntAdapterManager, AdapterPresence
 from .const import DOMAIN
-from .receiver import AntPlusReceiver
 
 
 async def async_setup_entry(
@@ -16,75 +17,96 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up the global HA ANT+ capture switch."""
-    receiver: AntPlusReceiver = hass.data[DOMAIN][entry.entry_id]
+    """Create one Capture switch for every physical ANT USB adapter."""
+    receiver = hass.data[DOMAIN][entry.entry_id]
+    manager: AntAdapterManager = receiver.adapter_manager
+    known: set[str] = set()
 
-    async_add_entities(
-        [AntPlusCaptureSwitch(receiver)],
-        update_before_add=False,
-    )
+    def add(stable_key: str) -> None:
+        if stable_key in known or manager.get(stable_key) is None:
+            return
+        known.add(stable_key)
+        async_add_entities(
+            [AntUsbAdapterCaptureSwitch(manager, stable_key)],
+            update_before_add=False,
+        )
+
+    for stable_key in manager.records:
+        add(stable_key)
+
+    def changed(stable_key: str) -> None:
+        hass.loop.call_soon_threadsafe(add, stable_key)
+
+    entry.async_on_unload(manager.add_callback(changed))
 
 
-class AntPlusCaptureSwitch(SwitchEntity):
-    """Enable or disable ANT+ capture from every source."""
+class AntUsbAdapterCaptureSwitch(SwitchEntity):
+    """Capture control for one physical ANT USB adapter."""
 
     _attr_name = "Capture"
-    _attr_unique_id = "antplus_capture"
     _attr_icon = "mdi:access-point"
 
-    def __init__(self, receiver: AntPlusReceiver) -> None:
-        self.receiver = receiver
+    def __init__(
+        self,
+        manager: AntAdapterManager,
+        stable_key: str,
+    ) -> None:
+        self.manager = manager
+        self.stable_key = stable_key
+        self._attr_unique_id = f"antplus_usb_adapter_{stable_key}_capture"
 
     @property
-    def is_on(self) -> bool:
-        """Return the global capture state."""
-        return self.receiver.capture_enabled
+    def _record(self) -> AdapterPresence | None:
+        return self.manager.get(self.stable_key)
 
     @property
     def available(self) -> bool:
-        """The global control is always available."""
-        return True
+        record = self._record
+        return bool(record and record.available)
+
+    @property
+    def is_on(self) -> bool:
+        record = self._record
+        return bool(record and record.capture_enabled)
 
     @property
     def extra_state_attributes(self):
-        """Expose transport diagnostics."""
-        sources = set()
-
-        for device in self.receiver.snapshot().values():
-            sources.update(
-                device.decoder_state.get("sources", set())
-            )
-
+        record = self._record
+        if record is None:
+            return {}
         return {
-            "local_receiver_status": self.receiver.state,
-            "local_receiver_error": self.receiver.error,
-            "sources_seen": sorted(sources),
-            "remote_capture_enabled": self.receiver.capture_enabled,
+            "adapter_id": self.stable_key,
+            "connection": record.connection,
+            "local": record.local_present,
+            "remote_gateways": sorted(record.remote_gateways or {}),
         }
 
-    async def async_turn_on(self, **kwargs) -> None:
-        """Enable capture from local and remote ANT+ adapters."""
-        await self.hass.async_add_executor_job(
-            self.receiver.enable_capture
+    @property
+    def device_info(self) -> DeviceInfo | None:
+        record = self._record
+        if record is None:
+            return None
+        adapter = record.adapter
+        return DeviceInfo(
+            identifiers={adapter.ha_identifier},
+            name=adapter.name,
+            manufacturer=adapter.manufacturer or "Dynastream / Garmin",
+            model=adapter.product or f"ANT USB {adapter.vid}:{adapter.pid}",
+            serial_number=adapter.serial,
         )
-        self.async_write_ha_state()
+
+    async def async_turn_on(self, **kwargs) -> None:
+        await self.manager.async_set_capture(self.stable_key, True)
 
     async def async_turn_off(self, **kwargs) -> None:
-        """Disable capture from local and remote ANT+ adapters."""
-        await self.hass.async_add_executor_job(
-            self.receiver.disable_capture
-        )
-        self.async_write_ha_state()
+        await self.manager.async_set_capture(self.stable_key, False)
 
     async def async_added_to_hass(self) -> None:
-        """Register receiver state updates."""
         await super().async_added_to_hass()
 
-        def changed() -> None:
-            self.hass.loop.call_soon_threadsafe(
-                self.async_write_ha_state
-            )
+        def changed(stable_key: str) -> None:
+            if stable_key != self.stable_key:
+                return
+            self.hass.loop.call_soon_threadsafe(self.async_write_ha_state)
 
-        self.async_on_remove(
-            self.receiver.add_state_callback(changed)
-        )
+        self.async_on_remove(self.manager.add_callback(changed))
