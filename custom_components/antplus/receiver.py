@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import datetime, timezone
 import logging
+from pathlib import Path
 import threading
 from typing import Any
 
@@ -22,6 +23,8 @@ from .decoder import decode_packet
 from .models import AntDevice
 
 _LOGGER = logging.getLogger(__name__)
+
+SUPPORTED_LOCAL_USB_IDS = {("0FCF", "1008"), ("0FCF", "1009")}
 
 DeviceCallback = Callable[[AntDevice], None]
 MetricCallback = Callable[[AntDevice, str], None]
@@ -93,10 +96,10 @@ class AntPlusReceiver:
         self._state = state
         if error is not None:
             self.error = error
-        elif state in ("starting", "running"):
+        elif state in ("starting", "running", "remote"):
             self.error = None
 
-        if state in ("running", "error", "stopped"):
+        if state in ("running", "remote", "error", "stopped"):
             self._started_event.set()
 
         for callback in tuple(self._state_callbacks):
@@ -104,6 +107,21 @@ class AntPlusReceiver:
                 callback()
             except Exception:
                 _LOGGER.debug("ANT+ state callback failed", exc_info=True)
+
+    def _local_usb_present(self) -> bool:
+        """Return whether a supported ANT USB adapter is attached locally."""
+        root = Path("/sys/bus/usb/devices")
+        if not root.exists():
+            return False
+        for device_path in root.glob("*"):
+            try:
+                vid = (device_path / "idVendor").read_text().strip().upper()
+                pid = (device_path / "idProduct").read_text().strip().upper()
+            except (OSError, UnicodeError):
+                continue
+            if (vid, pid) in SUPPORTED_LOCAL_USB_IDS:
+                return True
+        return False
 
     def enable_capture(self) -> None:
         """Enable capture from all ANT+ sources."""
@@ -121,8 +139,11 @@ class AntPlusReceiver:
                         exc_info=True,
                     )
 
-        # Also start the optional local adapter.
-        self.start(wait=False)
+        # Start local OpenANT only if local ANT USB hardware exists.
+        if self._local_usb_present():
+            self.start(wait=False)
+        else:
+            self._set_state("remote")
 
     def disable_capture(self) -> None:
         """Disable capture from all ANT+ sources."""
@@ -145,6 +166,10 @@ class AntPlusReceiver:
 
     def start(self, wait: bool = True) -> None:
         """Start the optional local ANT USB receiver."""
+        # Missing local USB is normal in a remote-gateway setup.
+        if not self._local_usb_present():
+            self._set_state("remote")
+            return
         with self._control_lock:
             if not self._capture_enabled:
                 return

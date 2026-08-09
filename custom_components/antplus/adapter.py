@@ -257,12 +257,12 @@ def async_register_known_adapters(
         )
 
 
-def async_scan_local_adapters(
+async def async_scan_local_adapters(
     hass: HomeAssistant,
     entry: ConfigEntry,
 ) -> list[AntUsbAdapter]:
     """Discover and register adapters physically attached to the HA host."""
-    adapters = scan_linux_ant_adapters()
+    adapters = await hass.async_add_executor_job(scan_linux_ant_adapters)
 
     # The legacy integration represented one adapter as ("antplus", "usb_adapter").
     # If exactly one physical adapter is present, migrate that old HA device instead

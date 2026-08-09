@@ -5,7 +5,6 @@ from __future__ import annotations
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN
@@ -62,16 +61,6 @@ class AntPlusCaptureSwitch(SwitchEntity):
             "sources_seen": sorted(sources),
             "remote_capture_enabled": self.receiver.capture_enabled,
         }
-
-    @property
-    def device_info(self) -> DeviceInfo:
-        """Represent the global HA ANT+ hub."""
-        return DeviceInfo(
-            identifiers={(DOMAIN, "hub")},
-            name="HA ANT+",
-            manufacturer="HA ANT+",
-            model="ANT+ Hub",
-        )
 
     async def async_turn_on(self, **kwargs) -> None:
         """Enable capture from local and remote ANT+ adapters."""

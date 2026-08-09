@@ -21,7 +21,8 @@ class AntPlusConfigFlow(
 ):
     """Configure HA ANT+."""
 
-    VERSION = 2
+    VERSION = 1
+    MINOR_VERSION = 1
 
     def __init__(self) -> None:
         self._usb_info: UsbServiceInfo | None = None

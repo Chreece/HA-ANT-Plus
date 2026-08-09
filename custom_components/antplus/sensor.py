@@ -35,8 +35,6 @@ async def async_setup_entry(
 
     async_add_entities(
         [
-            AntPlusCaptureStatusSensor(receiver),
-            AntPlusCaptureErrorSensor(receiver),
             AntPlusDecoderCoverageSensor(receiver),
         ],
         update_before_add=False,
@@ -167,76 +165,6 @@ class AntPlusSensor(AntPlusEntity, SensorEntity):
 
 
 
-class AntPlusCaptureStatusSensor(SensorEntity):
-    """Diagnostic status of the local ANT+ transport."""
-
-    _attr_name = "Local USB Status"
-    _attr_unique_id = "antplus_capture_status"
-    _attr_icon = "mdi:access-point-network"
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
-
-    def __init__(self, receiver: AntPlusReceiver) -> None:
-        self.receiver = receiver
-
-    @property
-    def native_value(self):
-        return self.receiver.state
-
-    @property
-    def device_info(self):
-        from homeassistant.helpers.entity import DeviceInfo
-        return DeviceInfo(
-            identifiers={(DOMAIN, "hub")},
-            name="HA ANT+",
-            manufacturer="HA ANT+",
-            model="ANT+ Hub",
-        )
-
-    async def async_added_to_hass(self) -> None:
-        await super().async_added_to_hass()
-
-        def changed() -> None:
-            self.hass.loop.call_soon_threadsafe(self.async_write_ha_state)
-
-        self.async_on_remove(self.receiver.add_state_callback(changed))
-
-
-class AntPlusCaptureErrorSensor(SensorEntity):
-    """Last ANT+ receiver error."""
-
-    _attr_name = "Local USB Error"
-    _attr_unique_id = "antplus_capture_last_error"
-    _attr_icon = "mdi:alert-circle-outline"
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
-    _attr_entity_registry_enabled_default = False
-
-    def __init__(self, receiver: AntPlusReceiver) -> None:
-        self.receiver = receiver
-
-    @property
-    def native_value(self):
-        return self.receiver.error or "none"
-
-    @property
-    def device_info(self):
-        from homeassistant.helpers.entity import DeviceInfo
-        return DeviceInfo(
-            identifiers={(DOMAIN, "hub")},
-            name="HA ANT+",
-            manufacturer="HA ANT+",
-            model="ANT+ Hub",
-        )
-
-    async def async_added_to_hass(self) -> None:
-        await super().async_added_to_hass()
-
-        def changed() -> None:
-            self.hass.loop.call_soon_threadsafe(self.async_write_ha_state)
-
-        self.async_on_remove(self.receiver.add_state_callback(changed))
-
-
-
 class AntPlusDecoderCoverageSensor(SensorEntity):
     """Profiles with semantic parsers available in this integration."""
 
@@ -270,13 +198,3 @@ class AntPlusDecoderCoverageSensor(SensorEntity):
             ],
             "raw_fallback_for_all_profiles": True,
         }
-
-    @property
-    def device_info(self):
-        from homeassistant.helpers.entity import DeviceInfo
-        return DeviceInfo(
-            identifiers={(DOMAIN, "hub")},
-            name="HA ANT+",
-            manufacturer="HA ANT+",
-            model="ANT+ Hub",
-        )
