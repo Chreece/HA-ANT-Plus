@@ -32,7 +32,6 @@ async def async_setup_entry(
         async_add_entities(
             [AntUsbAdapterCaptureSwitch(manager, stable_key)],
             update_before_add=False,
-            subentry_id=subentry_id,
         )
 
     for stable_key in manager.records:

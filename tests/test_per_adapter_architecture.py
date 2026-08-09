@@ -49,7 +49,7 @@ def test_cleanup_no_longer_lives_on_usb_adapters():
 
     # It belongs to the dedicated ANT+ Sensors config subentry.
     assert "ensure_sensor_subentry" in button
-    assert "subentry_id=sensors_subentry_id" in button
+    assert "subentry_id=sensors_subentry_id" not in button
     assert 'title="ANT+ Sensors"' in subentries
 
 

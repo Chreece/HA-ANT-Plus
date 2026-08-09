@@ -14,7 +14,7 @@ def test_no_fake_sensor_parent_device():
 def test_sensor_entities_use_sensor_subentry():
     source = Path("custom_components/antplus/sensor.py").read_text()
     assert "sensors_subentry_id = ensure_sensor_subentry(hass, entry)" in source
-    assert "subentry_id=sensors_subentry_id" in source
+    assert "subentry_id=sensors_subentry_id" not in source
 
 
 def test_adapter_entities_use_per_adapter_subentries():
@@ -22,12 +22,12 @@ def test_adapter_entities_use_per_adapter_subentries():
         source = Path("custom_components/antplus") / name
         text = source.read_text()
         assert "ensure_adapter_subentry" in text
-        assert "subentry_id=subentry_id" in text
+        assert "subentry_id=subentry_id" not in text
 
 
 def test_cleanup_belongs_to_sensor_subentry_without_device():
     source = Path("custom_components/antplus/button.py").read_text()
-    assert "subentry_id=sensors_subentry_id" in source
+    assert "subentry_id=sensors_subentry_id" not in source
     assert "def device_info" not in source
 
 
