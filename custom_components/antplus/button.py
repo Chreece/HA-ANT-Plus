@@ -10,6 +10,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN
@@ -92,37 +93,73 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
+    """Create one cleanup button for every physical ANT USB adapter."""
     receiver: AntPlusReceiver = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities(
-        [AntPlusCleanupStaleDevicesButton(hass, entry, receiver)],
-        update_before_add=False,
-    )
+    manager = receiver.adapter_manager
+    known: set[str] = set()
+
+    def add(stable_key: str) -> None:
+        if stable_key in known or manager.get(stable_key) is None:
+            return
+        known.add(stable_key)
+        async_add_entities(
+            [AntUsbAdapterCleanupStaleDevicesButton(hass, entry, receiver, manager, stable_key)],
+            update_before_add=False,
+        )
+
+    for stable_key in manager.records:
+        add(stable_key)
+
+    def changed(stable_key: str) -> None:
+        hass.loop.call_soon_threadsafe(add, stable_key)
+
+    entry.async_on_unload(manager.add_callback(changed))
 
 
-class AntPlusCleanupStaleDevicesButton(ButtonEntity):
+class AntUsbAdapterCleanupStaleDevicesButton(ButtonEntity):
+    """Integration-wide sensor cleanup surfaced on one physical adapter."""
+
     _attr_name = "Clean stale ANT+ devices"
-    _attr_unique_id = "antplus_cleanup_stale_devices"
     _attr_icon = "mdi:broom"
     _attr_should_poll = False
 
-    def __init__(
-        self,
-        hass: HomeAssistant,
-        entry: ConfigEntry,
-        receiver: AntPlusReceiver,
-    ) -> None:
+    def __init__(self, hass, entry, receiver, manager, stable_key: str) -> None:
         self._hass = hass
         self._entry = entry
         self._receiver = receiver
+        self._manager = manager
+        self._stable_key = stable_key
         self._last_removed: list[int] = []
+        self._attr_unique_id = f"antplus_usb_adapter_{stable_key}_cleanup_stale_devices"
+
+    @property
+    def _record(self):
+        return self._manager.get(self._stable_key)
 
     @property
     def available(self) -> bool:
-        return self._receiver.capture_enabled
+        record = self._record
+        return bool(record and record.available)
+
+    @property
+    def device_info(self) -> DeviceInfo | None:
+        record = self._record
+        if record is None:
+            return None
+        adapter = record.adapter
+        return DeviceInfo(
+            identifiers={adapter.ha_identifier},
+            name=adapter.name,
+            manufacturer=adapter.manufacturer or "Dynastream / Garmin",
+            model=adapter.product or f"ANT USB {adapter.vid}:{adapter.pid}",
+            serial_number=adapter.serial,
+        )
 
     @property
     def extra_state_attributes(self):
         return {
+            "scope": "all_ant_sensors",
+            "adapter_id": self._stable_key,
             "confirmed_ant_devices": sorted(self._receiver.devices),
             "last_removed_count": len(self._last_removed),
             "last_removed_ant_ids": self._last_removed,
@@ -130,12 +167,11 @@ class AntPlusCleanupStaleDevicesButton(ButtonEntity):
 
     async def async_press(self) -> None:
         self._last_removed = await async_cleanup_stale_raw_devices(
-            self._hass,
-            self._entry,
-            self._receiver,
+            self._hass, self._entry, self._receiver
         )
         _LOGGER.info(
-            "ANT+ stale-device cleanup completed: removed %d device(s): %s",
+            "ANT+ cleanup requested from adapter %s: removed %d device(s): %s",
+            self._stable_key,
             len(self._last_removed),
             self._last_removed,
         )

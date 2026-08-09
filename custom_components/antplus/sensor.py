@@ -41,12 +41,6 @@ async def async_setup_entry(
     timeout = int(entry.options.get("inactivity_timeout", DEFAULT_INACTIVITY_TIMEOUT))
     known_entities: set[tuple[int, str]] = set()
 
-    async_add_entities(
-        [
-            AntPlusDecoderCoverageSensor(receiver),
-        ],
-        update_before_add=False,
-    )
 
     @callback
     def add_metric_entity(device_id: int, metric_key: str) -> None:

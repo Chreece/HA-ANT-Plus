@@ -107,6 +107,12 @@ async def async_cleanup_legacy_entities(
         "antplus_capture",
         "antplus_capture_status",
         "antplus_capture_last_error",
+        "antplus_cleanup_stale_devices",
+        "antplus_receiver_state",
+        "antplus_confirmed_devices",
+        "antplus_discovery_candidates",
+        "antplus_last_error",
+        "antplus_decoder_coverage",
     }
 
     for entity in list(entity_registry.entities.values()):
@@ -126,3 +132,10 @@ async def async_cleanup_legacy_entities(
     )
     if hub is not None:
         device_registry.async_remove_device(hub.id)
+
+    integration_device = device_registry.async_get_device_by_identifier(
+        (DOMAIN, "integration"),
+        entry.entry_id,
+    )
+    if integration_device is not None:
+        device_registry.async_remove_device(integration_device.id)
