@@ -19,23 +19,26 @@ def test_remote_payload_list():
 def test_same_ant_id_merges_sources():
     receiver = AntPlusReceiver()
 
-    # Heart-rate-shaped packet.
-    receiver.process_packet(
-        device_id=12345,
-        device_type=120,
-        transmission_type=1,
-        payload=bytes([0, 0, 0, 0, 0, 0, 0, 75]),
-        source="remote:gym-pi",
-    )
+    # Confirm the heart-rate identity/profile.
+    for _ in range(5):
+        receiver.process_packet(
+            device_id=12345,
+            device_type=120,
+            transmission_type=1,
+            payload=bytes([0, 0, 0, 0, 0, 0, 0, 75]),
+            source="remote:gym-pi",
+        )
 
-    # Same ANT ID seen through another source/profile.
-    receiver.process_packet(
-        device_id=12345,
-        device_type=124,
-        transmission_type=5,
-        payload=bytes([0, 0, 0, 0, 0, 0, 0, 0]),
-        source="local",
-    )
+    # The same ANT ID appears through another source/profile. A newly
+    # observed profile must independently pass RF candidate validation.
+    for _ in range(5):
+        receiver.process_packet(
+            device_id=12345,
+            device_type=124,
+            transmission_type=5,
+            payload=bytes([0, 0, 0, 0, 0, 0, 0, 0]),
+            source="local",
+        )
 
     assert len(receiver.devices) == 1
 
@@ -55,13 +58,15 @@ def test_global_capture_blocks_remote_packets():
 
     receiver.disable_capture()
 
-    receiver.process_packet(
-        device_id=60000,
-        device_type=120,
-        transmission_type=1,
-        payload=bytes([0, 0, 0, 0, 0, 0, 0, 80]),
-        source="remote:test-gateway",
-    )
+    # New RF identities require five consistent packets before promotion.
+    for _ in range(5):
+        receiver.process_packet(
+            device_id=60000,
+            device_type=120,
+            transmission_type=1,
+            payload=bytes([0, 0, 0, 0, 0, 0, 0, 80]),
+            source="remote:test-gateway",
+        )
 
     assert receiver.devices == {}
 
@@ -75,12 +80,14 @@ def test_global_capture_accepts_remote_after_enable():
     # physical USB hardware. Enable the state directly for this unit test.
     receiver._capture_enabled = True
 
-    receiver.process_packet(
-        device_id=60000,
-        device_type=120,
-        transmission_type=1,
-        payload=bytes([0, 0, 0, 0, 0, 0, 0, 80]),
-        source="remote:test-gateway",
-    )
+    # A new RF identity must be seen repeatedly before promotion.
+    for _ in range(5):
+        receiver.process_packet(
+            device_id=60000,
+            device_type=120,
+            transmission_type=1,
+            payload=bytes([0, 0, 0, 0, 0, 0, 0, 80]),
+            source="remote:test-gateway",
+        )
 
     assert 60000 in receiver.devices

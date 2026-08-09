@@ -26,6 +26,12 @@ _LOGGER = logging.getLogger(__name__)
 
 SUPPORTED_LOCAL_USB_IDS = {("0FCF", "1008"), ("0FCF", "1009")}
 
+# Wildcard ANT scan mode can occasionally yield malformed/transient extended
+# packets. Do not create a persistent HA device/profile from a single packet.
+DISCOVERY_CONFIRM_PACKETS = 5
+DISCOVERY_CONFIRM_WINDOW_SECONDS = 10.0
+DISCOVERY_CANDIDATE_TTL_SECONDS = 30.0
+
 DeviceCallback = Callable[[AntDevice], None]
 MetricCallback = Callable[[AntDevice, str], None]
 StateCallback = Callable[[], None]
@@ -45,6 +51,15 @@ class AntPlusReceiver:
         self._device_callbacks: list[DeviceCallback] = []
         self._metric_callbacks: list[MetricCallback] = []
         self._state_callbacks: list[StateCallback] = []
+
+        # Unconfirmed RF discoveries. A tuple is promoted only after repeated
+        # observations, preventing one malformed wildcard-scan packet from
+        # permanently creating a Home Assistant device.
+        self._discovery_candidates: dict[
+            tuple[int, int, int],
+            dict[str, Any],
+        ] = {}
+
         self.error: str | None = None
         self._state = "stopped"
 
@@ -299,6 +314,88 @@ class AntPlusReceiver:
             source="local",
         )
 
+    def _expire_discovery_candidates(self, now_ts: float) -> None:
+        expired = [
+            key
+            for key, candidate in self._discovery_candidates.items()
+            if now_ts - float(candidate["last_seen"])
+            > DISCOVERY_CANDIDATE_TTL_SECONDS
+        ]
+        for key in expired:
+            self._discovery_candidates.pop(key, None)
+
+    def _candidate_confirmed(
+        self,
+        device_id: int,
+        device_type: int,
+        transmission_type: int,
+        payload: bytes,
+        source: str,
+    ) -> bool:
+        now_ts = datetime.now(timezone.utc).timestamp()
+        self._expire_discovery_candidates(now_ts)
+
+        key = (device_id, device_type, transmission_type)
+        candidate = self._discovery_candidates.get(key)
+
+        if candidate is None:
+            self._discovery_candidates[key] = {
+                "count": 1,
+                "first_seen": now_ts,
+                "last_seen": now_ts,
+                "last_payload": payload,
+                "sources": {source},
+            }
+            _LOGGER.debug(
+                "ANT+ discovery candidate %s type %s tx %s: 1/%s",
+                device_id,
+                device_type,
+                transmission_type,
+                DISCOVERY_CONFIRM_PACKETS,
+            )
+            return False
+
+        first_seen = float(candidate["first_seen"])
+        if now_ts - first_seen > DISCOVERY_CONFIRM_WINDOW_SECONDS:
+            candidate.clear()
+            candidate.update(
+                {
+                    "count": 1,
+                    "first_seen": now_ts,
+                    "last_seen": now_ts,
+                    "last_payload": payload,
+                    "sources": {source},
+                }
+            )
+            return False
+
+        candidate["count"] = int(candidate["count"]) + 1
+        candidate["last_seen"] = now_ts
+        candidate["last_payload"] = payload
+        candidate.setdefault("sources", set()).add(source)
+
+        count = int(candidate["count"])
+        if count < DISCOVERY_CONFIRM_PACKETS:
+            _LOGGER.debug(
+                "ANT+ discovery candidate %s type %s tx %s: %s/%s",
+                device_id,
+                device_type,
+                transmission_type,
+                count,
+                DISCOVERY_CONFIRM_PACKETS,
+            )
+            return False
+
+        self._discovery_candidates.pop(key, None)
+        _LOGGER.info(
+            "Confirmed ANT+ RF identity %s type %s tx %s after %s packets",
+            device_id,
+            device_type,
+            transmission_type,
+            count,
+        )
+        return True
+
     def process_packet(
         self,
         device_id: int,
@@ -339,8 +436,24 @@ class AntPlusReceiver:
         metadata_changed = False
 
         with self._lock:
-            # Deliberately keyed ONLY by ANT device ID.
+            # ANT device ID remains the canonical HA identity. A brand-new
+            # device ID or a new profile on an existing device must first
+            # survive RF candidate validation.
             device = self.devices.get(device_id)
+            needs_confirmation = (
+                device is None
+                or device_type not in device.profiles
+            )
+
+            if needs_confirmation and not self._candidate_confirmed(
+                device_id,
+                device_type,
+                transmission_type,
+                payload,
+                source,
+            ):
+                return
+
             if device is None:
                 device = AntDevice(device_id=device_id)
                 self.devices[device_id] = device
