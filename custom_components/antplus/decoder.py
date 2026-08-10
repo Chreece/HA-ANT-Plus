@@ -153,6 +153,44 @@ def _decode_common(data: bytes) -> list[AntMetric]:
         voltage = coarse + fractional
         status = (data[7] & 0x70) >> 4
 
+        battery_descriptor = data[2]
+        if battery_descriptor != 0xFF:
+            battery_id = (battery_descriptor & 0xF0) >> 4
+            battery_count = battery_descriptor & 0x0F
+            metrics.extend([
+                _metric(
+                    "battery_id", "Battery ID", battery_id,
+                    icon="mdi:identifier",
+                    entity_category=EntityCategory.DIAGNOSTIC,
+                    enabled_default=False,
+                    availability_mode="device",
+                ),
+                _metric(
+                    "battery_count", "Battery Count", battery_count,
+                    icon="mdi:battery-multiple",
+                    entity_category=EntityCategory.DIAGNOSTIC,
+                    enabled_default=False,
+                    availability_mode="device",
+                ),
+            ])
+
+        operating_time_resolution = 2 if data[7] & 0x80 else 16
+        operating_time = int.from_bytes(data[3:5], "little") * operating_time_resolution
+        metrics.append(
+            _metric(
+                "battery_operating_time",
+                "Battery Operating Time",
+                operating_time,
+                "s",
+                "duration",
+                "total_increasing",
+                "mdi:timer-outline",
+                EntityCategory.DIAGNOSTIC,
+                False,
+                "device",
+            )
+        )
+
         # A coarse value of 0x0F means unavailable. A resulting voltage of
         # 0 V is also not a meaningful battery measurement, so don't create
         # the entity until we have a real value.
@@ -180,6 +218,32 @@ def _decode_common(data: bytes) -> list[AntMetric]:
                     status_name,
                     icon="mdi:battery-heart-variant",
                     entity_category=EntityCategory.DIAGNOSTIC,
+                    availability_mode="device",
+                )
+            )
+
+    elif page == 83:
+        # ANT+ Common Page 83 date/time. Keep it diagnostic because it is
+        # device-supplied clock information rather than a live measurement.
+        second, minute, hour = data[2], data[3], data[4]
+        day = data[5] & 0x1F
+        month = data[6]
+        year = data[7] + 2000
+        try:
+            device_time = datetime(
+                year, month, day, hour, minute, second
+            ).isoformat()
+        except ValueError:
+            device_time = None
+        if device_time is not None:
+            metrics.append(
+                _metric(
+                    "device_datetime",
+                    "Device Date/Time",
+                    device_time,
+                    icon="mdi:clock-outline",
+                    entity_category=EntityCategory.DIAGNOSTIC,
+                    enabled_default=False,
                     availability_mode="device",
                 )
             )
@@ -234,7 +298,7 @@ def _decode_heart_rate(data: bytes) -> list[AntMetric]:
                 enabled_default=False,
             ),
             _metric(
-                "device_serial_fragment", "Device Serial", serial,
+                "device_serial_fragment", "Device Serial Fragment", serial,
                 icon="mdi:identifier", entity_category=EntityCategory.DIAGNOSTIC,
                 enabled_default=False,
             ),
