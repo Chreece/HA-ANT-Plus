@@ -1,3 +1,12 @@
+## 2026.8.7
+
+- Add two-sided ANT+ telemetry coalescing for high-rate remote sensors: the gateway now collapses RF repetitions before WebSocket transport and HA independently coalesces received telemetry before decoding.
+- Treat only implemented/page-aware ANT+ profiles as page-keyed streams; raw/spec-required profiles such as Running Dynamics are coalesced per profile so arbitrary payload byte 0 values cannot create hundreds of fake page streams.
+- Preserve Controls Device, Shifting, Dropper and FE-C command-status packets outside telemetry coalescing so automation/control events remain lossless under normal operation.
+- Add a producer-side `GatewayPacketBuffer` so the Jetson no longer queues every repeated RF packet before the periodic sender can coalesce it.
+- Globally coalesce Home Assistant metric state writes into 100 ms windows and replace per-entity receiver callbacks with one integration-level dispatcher, eliminating O(metrics × entities) callback fanout.
+- Advertise `telemetry_protocol=2` from updated remote gateways while retaining compatibility with older gateways.
+
 
 ## 2026.8.6
 

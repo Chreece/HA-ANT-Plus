@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import logging
-import queue
+from collections import OrderedDict, deque
 import threading
+import time
 from typing import Any, Callable
 
 from homeassistant.config_entries import ConfigEntry
@@ -23,7 +24,14 @@ from .receiver import AntPlusReceiver
 _LOGGER = logging.getLogger(__name__)
 
 REMOTE_PACKET_QUEUE_MAX = 4096
+REMOTE_EVENT_QUEUE_MAX = 1024
 REMOTE_QUEUE_WARNING_INTERVAL = 250
+REMOTE_WORKER_COALESCE_WINDOW = 0.10
+
+PAGE_AWARE_PROFILE_TYPES = {
+    11, 16, 17, 20, 25, 34, 48, 115, 120, 121, 122, 123, 124, 127
+}
+EVENT_PROFILE_TYPES = {16, 34, 115}
 
 
 def _payload_bytes(value: Any) -> bytes:
@@ -71,15 +79,60 @@ def _process_remote_packet(
 
 
 
+def _remote_packet_page(packet: dict[str, Any]) -> int:
+    payload = packet.get("payload")
+    if isinstance(payload, str):
+        cleaned = payload.replace(" ", "").replace(":", "").replace("-", "")
+        try:
+            return int(cleaned[:2], 16) & 0x7F if len(cleaned) >= 2 else -1
+        except ValueError:
+            return -1
+    if isinstance(payload, (list, tuple)) and payload:
+        try:
+            return int(payload[0]) & 0x7F
+        except (TypeError, ValueError):
+            return -1
+    return -1
+
+
+def _remote_packet_is_event(packet: dict[str, Any]) -> bool:
+    try:
+        device_type = int(packet.get("device_type", -1))
+    except (TypeError, ValueError):
+        return False
+    page = _remote_packet_page(packet)
+    if device_type in EVENT_PROFILE_TYPES:
+        return True
+    return device_type == 17 and page == 0x47
+
+
+def _remote_packet_key(gateway_id: str, packet: dict[str, Any]) -> tuple:
+    try:
+        device_type = int(packet.get("device_type", -1))
+    except (TypeError, ValueError):
+        device_type = -1
+    base = (
+        gateway_id,
+        packet.get("adapter_id"),
+        packet.get("device_id"),
+        device_type,
+        packet.get("transmission_type"),
+    )
+    if device_type in PAGE_AWARE_PROFILE_TYPES:
+        return (*base, _remote_packet_page(packet))
+    return (*base, "profile")
+
+
 class RemotePacketWorker:
-    """Decode remote ANT+ packets outside Home Assistant's event loop."""
+    """Decode remote ANT+ telemetry outside HA and coalesce RF repetitions."""
 
     def __init__(self, receiver: AntPlusReceiver) -> None:
         self._receiver = receiver
-        self._queue: queue.Queue[tuple[str, dict[str, Any]] | None] = queue.Queue(
-            maxsize=REMOTE_PACKET_QUEUE_MAX
-        )
+        self._lock = threading.Lock()
+        self._wake = threading.Event()
         self._stop = threading.Event()
+        self._telemetry: OrderedDict[tuple, tuple[str, dict[str, Any]]] = OrderedDict()
+        self._events: deque[tuple[str, dict[str, Any]]] = deque(maxlen=REMOTE_EVENT_QUEUE_MAX)
         self._dropped = 0
         self._thread = threading.Thread(
             target=self._run,
@@ -93,79 +146,75 @@ class RemotePacketWorker:
         return self._dropped
 
     def enqueue(self, gateway_id: str, packet: dict[str, Any]) -> None:
-        """Queue a packet without ever blocking HA's MainThread.
-
-        If saturated, discard the oldest packet so current live telemetry wins
-        over stale backlog. ANT+ broadcasts repeat rapidly, making this safer
-        than allowing an unbounded queue to stall Home Assistant.
-        """
+        """Store newest telemetry while preserving discrete event packets."""
         item = (gateway_id, dict(packet))
-        try:
-            self._queue.put_nowait(item)
-            return
-        except queue.Full:
-            pass
+        with self._lock:
+            if _remote_packet_is_event(packet):
+                if len(self._events) >= REMOTE_EVENT_QUEUE_MAX:
+                    self._dropped += 1
+                self._events.append(item)
+            else:
+                key = _remote_packet_key(gateway_id, packet)
+                if key in self._telemetry:
+                    self._telemetry.pop(key, None)
+                elif len(self._telemetry) >= REMOTE_PACKET_QUEUE_MAX:
+                    self._telemetry.popitem(last=False)
+                    self._dropped += 1
+                self._telemetry[key] = item
 
-        try:
-            self._queue.get_nowait()
-            self._queue.task_done()
-        except queue.Empty:
-            pass
-
-        self._dropped += 1
-        if self._dropped == 1 or self._dropped % REMOTE_QUEUE_WARNING_INTERVAL == 0:
-            _LOGGER.warning(
-                "Remote ANT+ packet queue saturated; dropped %d stale packet(s)",
-                self._dropped,
-            )
-
-        try:
-            self._queue.put_nowait(item)
-        except queue.Full:
-            # A producer raced us after the discard. Dropping this packet is
-            # still preferable to blocking Home Assistant's event loop.
-            self._dropped += 1
+            if self._dropped and (
+                self._dropped == 1
+                or self._dropped % REMOTE_QUEUE_WARNING_INTERVAL == 0
+            ):
+                _LOGGER.warning(
+                    "Remote ANT+ coalescer dropped %d stale packet(s)",
+                    self._dropped,
+                )
+        self._wake.set()
 
     def stop(self) -> None:
-        """Stop the worker without blocking HA shutdown indefinitely."""
         self._stop.set()
-        try:
-            self._queue.put_nowait(None)
-        except queue.Full:
-            try:
-                self._queue.get_nowait()
-                self._queue.task_done()
-                self._queue.put_nowait(None)
-            except queue.Empty:
-                pass
+        self._wake.set()
         self._thread.join(timeout=2.0)
+
+    def _take_pending(self) -> tuple[list[tuple[str, dict[str, Any]]], list[tuple[str, dict[str, Any]]]]:
+        with self._lock:
+            events = list(self._events)
+            self._events.clear()
+            telemetry = list(self._telemetry.values())
+            self._telemetry.clear()
+            self._wake.clear()
+        return events, telemetry
+
+    def _decode_item(self, item: tuple[str, dict[str, Any]]) -> None:
+        gateway_id, packet = item
+        try:
+            _process_remote_packet(self._receiver, packet, gateway_id)
+        except (KeyError, TypeError, ValueError) as err:
+            _LOGGER.warning(
+                "Ignoring invalid ANT+ packet from gateway %s: %s",
+                gateway_id,
+                err,
+            )
+        except Exception:
+            _LOGGER.exception(
+                "Unexpected error decoding ANT+ packet from gateway %s",
+                gateway_id,
+            )
 
     def _run(self) -> None:
         while not self._stop.is_set():
-            try:
-                item = self._queue.get(timeout=0.5)
-            except queue.Empty:
+            if not self._wake.wait(timeout=0.5):
                 continue
+            # Give a short RF window time to collapse repeated telemetry.
+            if self._stop.wait(REMOTE_WORKER_COALESCE_WINDOW):
+                return
+            events, telemetry = self._take_pending()
+            for item in events:
+                self._decode_item(item)
+            for item in telemetry:
+                self._decode_item(item)
 
-            try:
-                if item is None:
-                    return
-                gateway_id, packet = item
-                try:
-                    _process_remote_packet(self._receiver, packet, gateway_id)
-                except (KeyError, TypeError, ValueError) as err:
-                    _LOGGER.warning(
-                        "Ignoring invalid ANT+ packet from gateway %s: %s",
-                        gateway_id,
-                        err,
-                    )
-                except Exception:
-                    _LOGGER.exception(
-                        "Unexpected error decoding ANT+ packet from gateway %s",
-                        gateway_id,
-                    )
-            finally:
-                self._queue.task_done()
 
 def _parse_adapters(value: Any, gateway_id: str) -> list[AntUsbAdapter]:
     if not isinstance(value, list):

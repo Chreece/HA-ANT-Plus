@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import OrderedDict, deque
 from contextlib import contextmanager
 import json
 import logging
@@ -39,6 +40,7 @@ CAPTURE_STATE_EVENT = "antplus_adapter_capture_state"
 CONTROL_EVENT = "antplus_adapter_control"
 CONTROL_RESULT_EVENT = "antplus_adapter_control_result"
 CONTROL_PROTOCOL = 1
+TELEMETRY_PROTOCOL = 2
 
 SUPPORTED_USB_IDS = {
     ("0FCF", "1008"),
@@ -53,35 +55,69 @@ CAPTURE_RETRY_DELAY = 2.0
 _LOGGER = logging.getLogger("ha_antplus_gateway")
 
 
-MAX_REMOTE_BATCH_PACKETS = 256
+MAX_REMOTE_BATCH_PACKETS = 128
 MAX_REMOTE_DRAIN_PACKETS = 2048
+
+# Profiles for which byte 0 is a documented/implemented ANT data-page selector.
+# Raw/spec-required profiles are intentionally coalesced at profile level: their
+# byte 0 may be payload data rather than a page number (notably Running
+# Dynamics), and treating it as a page can explode one RF stream into hundreds
+# of apparently unique telemetry keys.
+PAGE_AWARE_PROFILE_TYPES = {
+    11, 16, 17, 20, 25, 34, 48, 115, 120, 121, 122, 123, 124, 127
+}
+
+# Event-bearing packets must never be replaced by newer telemetry.
+EVENT_PROFILE_TYPES = {16, 34, 115}
+
+
+def _packet_page(packet: dict[str, Any]) -> int:
+    payload = str(packet.get("payload", ""))
+    try:
+        return int(payload[:2], 16) & 0x7F if len(payload) >= 2 else -1
+    except ValueError:
+        return -1
+
+
+def _packet_is_event(packet: dict[str, Any]) -> bool:
+    """Return whether a received packet can carry a discrete HA event."""
+    device_type = int(packet.get("device_type", -1))
+    page = _packet_page(packet)
+    if device_type in EVENT_PROFILE_TYPES:
+        return True
+    # FE-C command status page 71 must remain lossless as well.
+    return device_type == 17 and page == 0x47
 
 
 def _packet_coalesce_key(packet: dict[str, Any]) -> tuple:
-    payload = str(packet.get("payload", ""))
-    try:
-        page = int(payload[:2], 16) & 0x7F if len(payload) >= 2 else -1
-    except ValueError:
-        page = -1
-
-    return (
+    device_type = int(packet.get("device_type", -1))
+    base = (
         packet.get("adapter_id"),
         packet.get("device_id"),
-        packet.get("device_type"),
+        device_type,
         packet.get("transmission_type"),
-        page,
     )
+    if device_type in PAGE_AWARE_PROFILE_TYPES:
+        return (*base, _packet_page(packet))
+    # For raw/spec-required profiles preserve the newest complete payload for
+    # the profile instead of assuming byte 0 is a page selector.
+    return (*base, "profile")
 
 
 def _coalesce_packets(
     packets: list[dict[str, Any]],
     limit: int = MAX_REMOTE_BATCH_PACKETS,
 ) -> list[dict[str, Any]]:
-    # Keep only the newest packet per adapter/sensor/profile/page.
+    # Event-bearing packets remain lossless. Telemetry keeps only the newest
+    # packet for each semantic stream key.
+    events: list[dict[str, Any]] = []
     latest: dict[tuple, dict[str, Any]] = {}
     order: list[tuple] = []
 
     for packet in packets:
+        if _packet_is_event(packet):
+            events.append(packet)
+            continue
         key = _packet_coalesce_key(packet)
         if key in latest:
             try:
@@ -94,7 +130,52 @@ def _coalesce_packets(
     if len(order) > limit:
         order = order[-limit:]
 
-    return [latest[key] for key in order]
+    # The telemetry cap must never discard discrete event packets.
+    return events + [latest[key] for key in order]
+class GatewayPacketBuffer:
+    """Thread-safe newest-state buffer for high-rate ANT telemetry."""
+
+    def __init__(self, max_telemetry: int = 2048, max_events: int = 2048) -> None:
+        self._max_telemetry = max_telemetry
+        self._events: deque[dict[str, Any]] = deque(maxlen=max_events)
+        self._telemetry: OrderedDict[tuple, dict[str, Any]] = OrderedDict()
+        self._lock = threading.Lock()
+        self.dropped_telemetry = 0
+        self.dropped_events = 0
+
+    def put_nowait(self, packet: dict[str, Any]) -> None:
+        """Accept a packet without blocking the ANT USB callback thread."""
+        packet = dict(packet)
+        with self._lock:
+            if _packet_is_event(packet):
+                if len(self._events) == self._events.maxlen:
+                    self.dropped_events += 1
+                self._events.append(packet)
+                return
+
+            key = _packet_coalesce_key(packet)
+            if key in self._telemetry:
+                self._telemetry.pop(key, None)
+            elif len(self._telemetry) >= self._max_telemetry:
+                self._telemetry.popitem(last=False)
+                self.dropped_telemetry += 1
+            self._telemetry[key] = packet
+
+    def drain(self, telemetry_limit: int) -> list[dict[str, Any]]:
+        """Drain all events plus the newest bounded telemetry snapshot."""
+        with self._lock:
+            events = list(self._events)
+            self._events.clear()
+            keys = list(self._telemetry.keys())[-telemetry_limit:]
+            telemetry = [self._telemetry.pop(key) for key in keys]
+            # If a pathological number of keys accumulated, stale leftovers are
+            # less useful than the next fresh RF sample.
+            if self._telemetry:
+                self.dropped_telemetry += len(self._telemetry)
+                self._telemetry.clear()
+        return events + telemetry
+
+
 _NODE_CREATE_LOCK = threading.Lock()
 
 
@@ -263,7 +344,7 @@ class AntScanner:
     def __init__(
         self,
         adapter: dict[str, Any],
-        packet_queue: queue.Queue[dict[str, Any]],
+        packet_queue: GatewayPacketBuffer,
         state_queue: queue.Queue[dict[str, Any]],
     ) -> None:
         self.adapter = adapter
@@ -510,7 +591,7 @@ class AntScanner:
 class HAConnection:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self.packet_queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=2048)
+        self.packet_queue = GatewayPacketBuffer(max_telemetry=2048, max_events=2048)
         self.state_queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=2048)
         self.next_id = 1
         self._adapters: dict[str, dict[str, Any]] = {}
@@ -621,6 +702,7 @@ class HAConnection:
                 "event_data": {
                     "gateway_id": self.settings.gateway_id,
                     "control_protocol": CONTROL_PROTOCOL,
+                    "telemetry_protocol": TELEMETRY_PROTOCOL,
                     "adapters": list(current.values()),
                 },
             },
@@ -660,12 +742,7 @@ class HAConnection:
     async def packet_sender(self, websocket) -> None:
         while True:
             await asyncio.sleep(self.settings.batch_interval)
-            packets: list[dict[str, Any]] = []
-            while len(packets) < MAX_REMOTE_DRAIN_PACKETS:
-                try:
-                    packets.append(self.packet_queue.get_nowait())
-                except queue.Empty:
-                    break
+            packets = self.packet_queue.drain(MAX_REMOTE_DRAIN_PACKETS)
             packets = _coalesce_packets(packets)
             if packets:
                 await self.send(
@@ -714,6 +791,7 @@ class HAConnection:
                     "event_data": {
                         "gateway_id": self.settings.gateway_id,
                         "control_protocol": CONTROL_PROTOCOL,
+                        "telemetry_protocol": TELEMETRY_PROTOCOL,
                         "adapters": list(self._adapters.values()),
                     },
                 },

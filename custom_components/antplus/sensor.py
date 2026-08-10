@@ -4,6 +4,7 @@ from __future__ import annotations
 from homeassistant.helpers.entity import EntityCategory
 
 from datetime import timedelta
+import threading
 from typing import Any
 
 from homeassistant.components.sensor import SensorEntity
@@ -44,6 +45,33 @@ async def async_setup_entry(
     timeout = int(entry.options.get("inactivity_timeout", DEFAULT_INACTIVITY_TIMEOUT))
     sensors_subentry_id = ensure_sensor_subentry(hass, entry)
     known_entities: set[tuple[int, str]] = set()
+    metric_entities: dict[tuple[int, str], AntPlusSensor] = {}
+    pending_metric_updates: set[tuple[int, str]] = set()
+    pending_lock = threading.Lock()
+    flush_scheduled = False
+
+    @callback
+    def flush_metric_updates() -> None:
+        nonlocal flush_scheduled
+        with pending_lock:
+            pending = tuple(pending_metric_updates)
+            pending_metric_updates.clear()
+            flush_scheduled = False
+
+        for identity in pending:
+            device_id, metric_key = identity
+            if identity not in known_entities:
+                add_metric_entity(device_id, metric_key)
+                continue
+            entity = metric_entities.get(identity)
+            if entity is not None and entity.hass is not None:
+                entity.async_write_ha_state()
+
+    @callback
+    def schedule_metric_flush() -> None:
+        # A 100 ms window keeps live telemetry responsive while collapsing
+        # high-rate ANT RF repetitions into at most 10 HA writes/s per metric.
+        hass.loop.call_later(0.1, flush_metric_updates)
 
 
     @callback
@@ -64,17 +92,25 @@ async def async_setup_entry(
             return
 
         known_entities.add(identity)
+        entity = AntPlusSensor(receiver, device, metric_key, timeout)
+        metric_entities[identity] = entity
         async_add_entities(
-            [AntPlusSensor(receiver, device, metric_key, timeout)],
+            [entity],
             update_before_add=False,
             config_subentry_id=sensors_subentry_id,
         )
 
     def metric_changed(device: AntDevice, metric_key: str) -> None:
-        def handle() -> None:
-            if (device.device_id, metric_key) not in known_entities:
-                add_metric_entity(device.device_id, metric_key)
-        hass.loop.call_soon_threadsafe(handle)
+        nonlocal flush_scheduled
+        identity = (device.device_id, metric_key)
+        should_schedule = False
+        with pending_lock:
+            pending_metric_updates.add(identity)
+            if not flush_scheduled:
+                flush_scheduled = True
+                should_schedule = True
+        if should_schedule:
+            hass.loop.call_soon_threadsafe(schedule_metric_flush)
 
     entry.async_on_unload(receiver.add_metric_callback(metric_changed))
 
@@ -158,14 +194,12 @@ class AntPlusSensor(AntPlusEntity, SensorEntity):
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
 
-        def metric_changed(device: AntDevice, metric_key: str) -> None:
-            if device.device_id == self.ant_device_id and metric_key == self.metric_key:
-                self.hass.loop.call_soon_threadsafe(self.async_write_ha_state)
-
         def receiver_changed() -> None:
             self.hass.loop.call_soon_threadsafe(self.async_write_ha_state)
 
-        self.async_on_remove(self.receiver.add_metric_callback(metric_changed))
+        # Metric writes are globally coalesced by async_setup_entry. Registering
+        # one receiver callback per entity creates O(metrics x entities) fanout
+        # under multi-profile devices such as running pods.
         self.async_on_remove(self.receiver.add_state_callback(receiver_changed))
         @callback
         def refresh_state(_now) -> None:
