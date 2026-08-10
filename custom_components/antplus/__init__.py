@@ -96,9 +96,15 @@ async def async_cleanup_legacy_entities(
     device_registry = dr.async_get(hass)
 
     unwanted_suffixes = {
+        # Component-only OpenANT fields superseded by canonical composite
+        # metrics or preserved losslessly by the Raw Data diagnostic.
         "_page_specific",
         "_voltage_coarse",
         "_voltage_fractional",
+        "_manufacturer_id_lsb",
+        # Pre-2026.8.5 OpenANT HR aliases duplicated native HR entities.
+        "_beat_count",
+        "_beat_time",
         "_capture_toggle",
     }
 
@@ -122,6 +128,11 @@ async def async_cleanup_legacy_entities(
         if (
             unique_id in obsolete_unique_ids
             or any(unique_id.endswith(suffix) for suffix in unwanted_suffixes)
+            # Bare `status` used to be emitted by OpenANT for unrelated
+            # profile/battery dataclasses. Status metrics are now namespaced
+            # (for example battery_status or lev_status), so the old generic
+            # entity is always obsolete.
+            or re.fullmatch(r"\d+_status", unique_id) is not None
             or re.search(r"_profile_\d+_page_\d+_raw$", unique_id) is not None
         ):
             entity_registry.async_remove(entity.entity_id)

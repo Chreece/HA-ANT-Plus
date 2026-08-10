@@ -159,11 +159,13 @@ class OpenAntParserAdapter:
 
 
 def _dataclass_to_metrics(page_name: str, data: Any) -> list[AntMetric]:
-    """Convert every useful OpenANT dataclass field into HA state.
+    """Convert useful OpenANT dataclass fields into canonical HA metrics.
 
-    Primary measurements stay normal entities. Protocol bookkeeping and
-    identification values remain available as diagnostic entities instead of
-    being silently suppressed. Complex values are normalized to stable text.
+    Native and OpenANT parse the same packet stream, so OpenANT field names are
+    normalized to the integration's canonical metric keys before the two
+    backends are merged. Raw byte/component fields that contain no information
+    beyond an already exposed composite value remain available through the
+    per-profile Raw Data diagnostic instead of becoming duplicate entities.
     """
     if not is_dataclass(data):
         return []
@@ -177,70 +179,265 @@ def _dataclass_to_metrics(page_name: str, data: Any) -> list[AntMetric]:
         except Exception:
             continue
 
-    is_battery_page = page_name == "battery"
-    if is_battery_page and ("voltage_coarse" in values or "voltage_fractional" in values):
+    # OpenANT also names some profile-specific pages "battery" (for example
+    # LEV page 0x04). Identify the ANT Common BatteryData callback by its
+    # component fields instead of the page-name string alone.
+    is_battery_page = (
+        page_name == "battery"
+        and "battery_id" in values
+        and "voltage_coarse" in values
+        and "voltage_fractional" in values
+    )
+
+    # Component-only fields are useful to a protocol debugger, but exposing
+    # them independently duplicates the canonical value. The bounded Raw Data
+    # entity already preserves the original bytes losslessly.
+    suppressed_components = {
+        "page_specific",
+        "voltage_coarse",
+        "voltage_fractional",
+    }
+
+    # Common Page 82 battery fields need battery-specific names. Without this,
+    # a profile's own operating_time/status can collide with battery state.
+    battery_aliases = {
+        "status": "battery_status",
+        "operating_time": "battery_operating_time",
+        "battery_id": "battery_id",
+    }
+
+    # OpenANT's HeartRateData names are different from our native decoder even
+    # though they represent the exact same ANT fields. Normalize them so native
+    # decoding wins instead of creating duplicate HA entities.
+    profile_fragment_aliases = {
+        "manufacturer_id_lsb": "manufacturer_id",
+        "serial_number": "device_serial_fragment",
+    }
+    heart_rate_aliases = {
+        "beat_count": "heart_beat_count",
+        "beat_time": "heart_beat_time",
+        "battery_percentage": "battery_level",
+        **profile_fragment_aliases,
+    }
+
+    general_aliases = {
+        "instantaneous_power": "power",
+        "instantaneous_speed": "speed",
+        "instantaneous_cadence": "cadence",
+        "battery_percentage": "battery_level",
+        "battery_soc": "battery_level",
+        "cumulative_operating_time": "operating_time",
+        "hardware_rev": "hardware_revision",
+        "software_rev": "software_revision",
+        "software_ver": "software_revision",
+        "model_no": "model_number",
+        "serial_no": "serial_number",
+    }
+
+    diagnostic_keys = {
+        "manufacturer_id",
+        "device_serial_fragment",
+        "serial_number",
+        "hardware_revision",
+        "software_revision",
+        "model_number",
+        "battery_id",
+        "battery_operating_time",
+        "heart_beat_count",
+        "heart_beat_time",
+        "previous_heart_beat_time",
+        "operating_time",
+        "event_count",
+        "accumulated_power",
+        "accumulated_torque",
+        "crank_ticks",
+        "wheel_ticks",
+        "command_sequence",
+        "slave_serial",
+        "slave_manufacturer_id",
+        "last_received_command_page",
+        "response_data",
+        "capabilities",
+    }
+
+    useful_diagnostics_enabled = {
+        "battery_status",
+        "battery_voltage",
+    }
+
+    # Synthesize canonical battery voltage before suppressing its component
+    # fields. Native decoding will take precedence when both backends know it.
+    if is_battery_page and (
+        "voltage_coarse" in values or "voltage_fractional" in values
+    ):
         coarse = values.get("voltage_coarse")
         fractional = values.get("voltage_fractional")
         if isinstance(coarse, (int, float)) and coarse not in (-1, 15, 255):
             voltage = float(coarse) + float(fractional or 0)
             if voltage > 0:
-                out.append(AntMetric(key="battery_voltage", name="Battery Voltage", value=round(voltage,3), unit="V", device_class="voltage", state_class="measurement", icon="mdi:battery", entity_category=EntityCategory.DIAGNOSTIC, enabled_default=True, updated_at=now, availability_mode="device"))
-        percentage = values.get("battery_percentage")
-        if isinstance(percentage,(int,float)) and 0 <= percentage <= 100:
-            out.append(AntMetric(key="battery_level", name="Battery", value=percentage, unit="%", device_class="battery", state_class="measurement", icon="mdi:battery", entity_category=EntityCategory.DIAGNOSTIC, enabled_default=True, updated_at=now, availability_mode="device"))
-
-    diagnostic_fields = {
-        "page_specific", "manufacturer_id_lsb", "manufacturer_id", "serial_number",
-        "serial_no", "hardware_rev", "hardware_revision", "software_rev",
-        "software_revision", "model_no", "model_number", "voltage_coarse",
-        "voltage_fractional", "battery_percentage", "beat_count", "beat_time",
-        "previous_heart_beat_time", "operating_time", "event_count",
-        "accumulated_power", "accumulated_torque", "crank_ticks", "wheel_ticks",
-        "command_sequence", "slave_serial", "slave_manufacturer_id",
-        "last_received_command_page", "response_data", "capabilities",
-    }
+                out.append(
+                    AntMetric(
+                        key="battery_voltage",
+                        name="Battery Voltage",
+                        value=round(voltage, 3),
+                        unit="V",
+                        device_class="voltage",
+                        state_class="measurement",
+                        icon="mdi:battery",
+                        entity_category=EntityCategory.DIAGNOSTIC,
+                        enabled_default=True,
+                        updated_at=now,
+                        availability_mode="device",
+                    )
+                )
 
     for field in fields(data):
         name = field.name
+        if name in suppressed_components:
+            continue
+
         try:
             value = getattr(data, name)
         except Exception:
             continue
         if value is None:
             continue
+        complex_value = isinstance(value, (set, list, tuple, dict))
         if isinstance(value, Enum):
             value = value.name
         elif isinstance(value, set):
-            value = ", ".join(sorted(getattr(v, "name", str(v)) for v in value))
+            value = ", ".join(
+                sorted(getattr(v, "name", str(v)) for v in value)
+            )
         elif isinstance(value, (list, tuple)):
             value = ", ".join(getattr(v, "name", str(v)) for v in value)
         elif isinstance(value, dict):
-            value = ", ".join(f"{k}={v}" for k,v in sorted(value.items(), key=lambda item: str(item[0])))
+            value = ", ".join(
+                f"{k}={v}"
+                for k, v in sorted(value.items(), key=lambda item: str(item[0]))
+            )
         elif is_dataclass(value):
             continue
-        if isinstance(value, int) and value in {-1,0xFF,0xFFFF,0xFFFFFF,0xFFFFFFFF}:
+
+        if isinstance(value, int) and value in {
+            -1,
+            0xFF,
+            0xFFFF,
+            0xFFFFFF,
+            0xFFFFFFFF,
+        }:
             continue
-        if isinstance(value,float) and value != value:
+        if isinstance(value, float) and value != value:
             continue
+
+        if is_battery_page:
+            key = battery_aliases.get(name, general_aliases.get(name, name))
+        elif page_name == "heart_rate":
+            key = heart_rate_aliases.get(name, general_aliases.get(name, name))
+        elif page_name in {"bike_speed", "bike_cadence"}:
+            key = profile_fragment_aliases.get(
+                name, general_aliases.get(name, name)
+            )
+        else:
+            key = general_aliases.get(name, name)
+
+        # A bare "status" key is ambiguous across profiles. Namespace it by
+        # the OpenANT page name so two status-bearing profiles can coexist.
+        if key == "status":
+            page_key = _normalise_page_name(page_name)
+            key = f"{page_key}_status"
+
+        # The HR page-specific value is already covered by Raw Data and has no
+        # stable semantic meaning across rotating HR pages.
+        if (
+            page_name in {"heart_rate", "bike_speed", "bike_cadence"}
+            and name == "manufacturer_id_lsb"
+        ):
+            friendly = "Manufacturer ID"
+        elif (
+            page_name in {"heart_rate", "bike_speed", "bike_cadence"}
+            and name == "serial_number"
+        ):
+            friendly = "Device Serial Fragment"
+        else:
+            friendly = _friendly_name(key)
 
         unit = field.metadata.get("unit") if field.metadata else None
-        key = _normalise_key(name)
-        friendly = name.replace("_"," ").title()
-        device_class,state_class,icon = _ha_semantics(key,unit)
-        diagnostic = name in diagnostic_fields or is_battery_page
-        out.append(AntMetric(key=key,name=friendly,value=value,unit=unit,device_class=device_class,state_class=state_class,icon=icon,entity_category=EntityCategory.DIAGNOSTIC if diagnostic else None,enabled_default=not diagnostic or name in {"status"},updated_at=now,availability_mode="device" if diagnostic else "metric"))
-    return out
+        if key in {"battery_operating_time", "operating_time"} and unit in {None, "seconds"}:
+            unit = "s"
+        if key == "battery_level" and unit is None:
+            unit = "%"
+        device_class, state_class, icon = _ha_semantics(key, unit)
 
-def _normalise_key(name: str) -> str:
-    aliases = {
-        "instantaneous_power": "power",
-        "average_power": "average_power",
-        "heart_rate": "heart_rate",
-        "temperature": "temperature",
-        "core_temperature": "core_temperature",
-        "battery_percentage": "battery_level",
+        is_status = key.endswith("_status")
+        diagnostic = (
+            is_battery_page
+            or key in diagnostic_keys
+            or is_status
+            or complex_value
+            or key.startswith("supported_")
+            or key.endswith("_event_time")
+            or key.startswith("cumulative_")
+        )
+        enabled_default = (
+            not diagnostic
+            or key in useful_diagnostics_enabled
+            or is_status
+        )
+
+        out.append(
+            AntMetric(
+                key=key,
+                name=friendly,
+                value=value,
+                unit=unit,
+                device_class=device_class,
+                state_class=state_class,
+                icon=icon,
+                entity_category=(
+                    EntityCategory.DIAGNOSTIC if diagnostic else None
+                ),
+                enabled_default=enabled_default,
+                updated_at=now,
+                availability_mode="device" if diagnostic else "metric",
+            )
+        )
+
+    return _deduplicate_metrics(out)
+
+
+def _normalise_page_name(page_name: str) -> str:
+    """Return a stable entity-key fragment for an OpenANT page name."""
+    normalized = "".join(
+        ch.lower() if ch.isalnum() else "_" for ch in page_name.strip()
+    )
+    return "_".join(part for part in normalized.split("_") if part) or "profile"
+
+
+def _friendly_name(key: str) -> str:
+    """Turn a canonical metric key into a stable HA display name."""
+    canonical = {
+        "battery_level": "Battery",
+        "power": "Power",
+        "heart_rate": "Heart Rate",
+        "cadence": "Cadence",
+        "speed": "Speed",
     }
-    return aliases.get(name, name)
+    if key in canonical:
+        return canonical[key]
+    acronyms = {"id": "ID", "ids": "IDs", "lev": "LEV", "tpms": "TPMS"}
+    return " ".join(
+        acronyms.get(part, part.capitalize())
+        for part in key.split("_")
+    )
+
+
+def _deduplicate_metrics(metrics: list[AntMetric]) -> list[AntMetric]:
+    """Keep the first canonical metric when one OpenANT page repeats a field."""
+    deduplicated: dict[str, AntMetric] = {}
+    for metric in metrics:
+        deduplicated.setdefault(metric.key, metric)
+    return list(deduplicated.values())
 
 
 def _ha_semantics(key: str, unit: str | None):
@@ -267,5 +464,7 @@ def _ha_semantics(key: str, unit: str | None):
         return None, "measurement", "mdi:rotate-right"
     if "torque" in key_l:
         return None, "measurement", "mdi:rotate-orbit"
+    if key_l.endswith("operating_time"):
+        return "duration", "total_increasing", "mdi:timer-outline"
 
     return None, "measurement" if isinstance(unit, str) and unit else None, None

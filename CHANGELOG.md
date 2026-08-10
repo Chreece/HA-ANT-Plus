@@ -1,3 +1,16 @@
+## 2026.8.5
+
+- Normalize semantic metric keys globally across native and OpenANT decoders so the same ANT field cannot create duplicate Home Assistant entities.
+- Collapse OpenANT Heart Rate aliases (`beat_count`, `beat_time`, manufacturer-ID LSB and profile serial fragment) into the native canonical HR entities.
+- Stop recreating component-only entities such as page-specific bytes and coarse/fractional voltage; the bounded Raw Data diagnostic preserves the original packet losslessly.
+- Namespace generic OpenANT status fields and map Common BatteryData status to the canonical `Battery Status` entity.
+- Separate Common Page 82 battery operating time from profile-specific operating time to prevent one entity from changing meaning between ANT pages.
+- Expose Common Page 82 Battery ID, Battery Count and Battery Operating Time as disabled-by-default diagnostics.
+- Expose Common Page 83 device date/time as a disabled-by-default diagnostic.
+- Distinguish OpenANT profile pages named `battery` (such as LEV battery data) from the actual Common BatteryData callback.
+- Classify protocol counters, event-time arrays, cumulative bookkeeping and capability fields as disabled-by-default diagnostics while keeping semantic measurements enabled.
+- Remove obsolete pre-normalization duplicate entities from the entity registry on integration setup.
+
 ## 2026.8.4
 
 - Make remote active control transactional: HA sends a correlated command ID and waits for the exact gateway/adapter to confirm success or report an error.
