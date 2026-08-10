@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import queue
+import threading
 from typing import Any, Callable
 
 from homeassistant.config_entries import ConfigEntry
@@ -19,6 +21,9 @@ from .const import (
 from .receiver import AntPlusReceiver
 
 _LOGGER = logging.getLogger(__name__)
+
+REMOTE_PACKET_QUEUE_MAX = 4096
+REMOTE_QUEUE_WARNING_INTERVAL = 250
 
 
 def _payload_bytes(value: Any) -> bytes:
@@ -65,6 +70,103 @@ def _process_remote_packet(
     )
 
 
+
+class RemotePacketWorker:
+    """Decode remote ANT+ packets outside Home Assistant's event loop."""
+
+    def __init__(self, receiver: AntPlusReceiver) -> None:
+        self._receiver = receiver
+        self._queue: queue.Queue[tuple[str, dict[str, Any]] | None] = queue.Queue(
+            maxsize=REMOTE_PACKET_QUEUE_MAX
+        )
+        self._stop = threading.Event()
+        self._dropped = 0
+        self._thread = threading.Thread(
+            target=self._run,
+            name="antplus-remote-packet-worker",
+            daemon=True,
+        )
+        self._thread.start()
+
+    @property
+    def dropped_packets(self) -> int:
+        return self._dropped
+
+    def enqueue(self, gateway_id: str, packet: dict[str, Any]) -> None:
+        """Queue a packet without ever blocking HA's MainThread.
+
+        If saturated, discard the oldest packet so current live telemetry wins
+        over stale backlog. ANT+ broadcasts repeat rapidly, making this safer
+        than allowing an unbounded queue to stall Home Assistant.
+        """
+        item = (gateway_id, dict(packet))
+        try:
+            self._queue.put_nowait(item)
+            return
+        except queue.Full:
+            pass
+
+        try:
+            self._queue.get_nowait()
+            self._queue.task_done()
+        except queue.Empty:
+            pass
+
+        self._dropped += 1
+        if self._dropped == 1 or self._dropped % REMOTE_QUEUE_WARNING_INTERVAL == 0:
+            _LOGGER.warning(
+                "Remote ANT+ packet queue saturated; dropped %d stale packet(s)",
+                self._dropped,
+            )
+
+        try:
+            self._queue.put_nowait(item)
+        except queue.Full:
+            # A producer raced us after the discard. Dropping this packet is
+            # still preferable to blocking Home Assistant's event loop.
+            self._dropped += 1
+
+    def stop(self) -> None:
+        """Stop the worker without blocking HA shutdown indefinitely."""
+        self._stop.set()
+        try:
+            self._queue.put_nowait(None)
+        except queue.Full:
+            try:
+                self._queue.get_nowait()
+                self._queue.task_done()
+                self._queue.put_nowait(None)
+            except queue.Empty:
+                pass
+        self._thread.join(timeout=2.0)
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                item = self._queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+
+            try:
+                if item is None:
+                    return
+                gateway_id, packet = item
+                try:
+                    _process_remote_packet(self._receiver, packet, gateway_id)
+                except (KeyError, TypeError, ValueError) as err:
+                    _LOGGER.warning(
+                        "Ignoring invalid ANT+ packet from gateway %s: %s",
+                        gateway_id,
+                        err,
+                    )
+                except Exception:
+                    _LOGGER.exception(
+                        "Unexpected error decoding ANT+ packet from gateway %s",
+                        gateway_id,
+                    )
+            finally:
+                self._queue.task_done()
+
 def _parse_adapters(value: Any, gateway_id: str) -> list[AntUsbAdapter]:
     if not isinstance(value, list):
         return []
@@ -99,6 +201,8 @@ def async_register_remote_listener(
 ) -> Callable[[], None]:
     """Register remote packets and gateway adapter-presence events."""
 
+    packet_worker = RemotePacketWorker(receiver)
+
     @callback
     def handle_packet_event(event: Event) -> None:
         data = event.data
@@ -110,17 +214,13 @@ def async_register_remote_listener(
         elif not isinstance(packets, list):
             return
 
+        # Never decode ANT packets in Home Assistant's event loop. The remote
+        # gateway can deliver hundreds of packets per second from multi-profile
+        # devices such as Stryd; enqueue only and let the dedicated worker do
+        # validation, OpenANT parsing and receiver updates.
         for packet in packets:
-            if not isinstance(packet, dict):
-                continue
-            try:
-                _process_remote_packet(receiver, packet, gateway_id)
-            except (KeyError, TypeError, ValueError) as err:
-                _LOGGER.warning(
-                    "Ignoring invalid ANT+ packet from gateway %s: %s",
-                    gateway_id,
-                    err,
-                )
+            if isinstance(packet, dict):
+                packet_worker.enqueue(gateway_id, packet)
 
     @callback
     def handle_gateway_hello(event: Event) -> None:
@@ -199,6 +299,7 @@ def async_register_remote_listener(
 
     def unsubscribe() -> None:
         unsub_packet()
+        packet_worker.stop()
         unsub_hello()
         unsub_status()
         unsub_capture_state()

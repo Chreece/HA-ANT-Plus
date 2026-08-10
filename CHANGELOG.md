@@ -1,3 +1,11 @@
+
+## 2026.8.6
+
+- Move all remote ANT+ packet validation/decoding off Home Assistant's MainThread into a dedicated worker thread.
+- Add a bounded 4096-packet remote queue; on saturation the oldest telemetry is discarded so stale backlog can never freeze HA.
+- Stop the remote packet worker cleanly when the integration unloads.
+- Reduce OpenANT power-meter per-packet logging from INFO to warnings/errors to avoid high-rate log storms.
+
 ## 2026.8.5
 
 - Normalize semantic metric keys globally across native and OpenANT decoders so the same ANT field cannot create duplicate Home Assistant entities.
