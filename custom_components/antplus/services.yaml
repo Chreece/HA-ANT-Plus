@@ -52,3 +52,9 @@ request_data_page:
       name: Number of responses
       default: 1
       selector: {number: {min: 1, max: 127, mode: box}}
+dump_diagnostics:
+  name: Dump ANT+ diagnostics
+  description: Log ANT+ runtime counters, timing data, queue gauges, and Python stacks for every thread. Intended for troubleshooting high CPU or stalls.
+reset_diagnostics:
+  name: Reset ANT+ diagnostics
+  description: Reset ANT+ runtime counters and timing data before reproducing a performance problem.

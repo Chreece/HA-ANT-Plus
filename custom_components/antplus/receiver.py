@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import logging
 from pathlib import Path
 import threading
+import time
 from typing import Any
 
 from openant.devices import ANTPLUS_NETWORK_KEY
@@ -20,6 +21,7 @@ from .const import (
     MANUFACTURERS,
 )
 from .decoder import decode_packet
+from .diagnostics import AntPlusDiagnostics
 from .models import AntDevice
 
 _LOGGER = logging.getLogger(__name__)
@@ -57,6 +59,7 @@ class AntPlusReceiver:
         self._metric_callbacks: list[MetricCallback] = []
         self._state_callbacks: list[StateCallback] = []
         self._packet_callbacks: list[PacketCallback] = []
+        self.diagnostics = AntPlusDiagnostics()
 
         # Unconfirmed RF discoveries. A tuple is promoted only after repeated
         # observations, preventing one malformed wildcard-scan packet from
@@ -431,6 +434,8 @@ class AntPlusReceiver:
         through local USB and/or multiple remote gateways, all packets update
         the same AntDevice instance.
         """
+        self.diagnostics.inc("receiver_packets_seen")
+        self.diagnostics.inc_profile("receiver_packets_seen", device_type)
         # One global Capture switch controls every ANT+ source.
         if not self._capture_enabled:
             return
@@ -484,6 +489,7 @@ class AntPlusReceiver:
                     )
                     return
                 device = AntDevice(device_id=device_id)
+                device.decoder_state["_diagnostics"] = self.diagnostics
                 self.devices[device_id] = device
                 new_device = True
 
@@ -532,7 +538,16 @@ class AntPlusReceiver:
 
             changed_metrics: list[str] = []
 
-            for metric in decode_packet(device, device_type, payload):
+            decode_started = time.perf_counter()
+            decoded_metrics = decode_packet(device, device_type, payload)
+            decode_elapsed = time.perf_counter() - decode_started
+            self.diagnostics.inc("decode_calls")
+            self.diagnostics.inc_profile("decode_calls", device_type)
+            self.diagnostics.inc("metrics_produced", len(decoded_metrics))
+            self.diagnostics.add_time("decode_total", decode_elapsed)
+            self.diagnostics.set_gauge("last_decode_device_type", device_type)
+
+            for metric in decoded_metrics:
                 old = device.metrics.get(metric.key)
 
                 if old is None and len(device.metrics) >= MAX_METRICS_PER_DEVICE:
@@ -589,6 +604,7 @@ class AntPlusReceiver:
                         exc_info=True,
                     )
 
+        self.diagnostics.inc("metrics_changed", len(changed_metrics))
         for key in changed_metrics:
             for callback in tuple(self._metric_callbacks):
                 try:

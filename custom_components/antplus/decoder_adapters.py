@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from typing import Protocol
+import time
 
 from .const import DEVICE_TYPE_NAMES
 from .models import AntDevice, AntMetric
@@ -52,7 +53,18 @@ class OpenAntAdapter:
             except Exception:
                 parser = False
             adapters[device_type] = parser
-        return parser.feed(payload) if parser else []
+        if not parser:
+            return []
+        diagnostics = device.decoder_state.get("_diagnostics")
+        started = time.perf_counter()
+        metrics = parser.feed(payload)
+        elapsed = time.perf_counter() - started
+        if diagnostics is not None:
+            diagnostics.inc("openant_calls")
+            diagnostics.inc_profile("openant_calls", device_type)
+            diagnostics.inc("openant_metrics", len(metrics))
+            diagnostics.add_time("openant_total", elapsed)
+        return metrics
 
 
 DECODER_ADAPTERS: tuple[DecoderAdapter, ...] = (

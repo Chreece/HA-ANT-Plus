@@ -58,6 +58,8 @@ async def async_setup_entry(
             pending_metric_updates.clear()
             flush_scheduled = False
 
+        receiver.diagnostics.inc("entity_flushes")
+        receiver.diagnostics.inc("entity_flush_identities", len(pending))
         for identity in pending:
             device_id, metric_key = identity
             if identity not in known_entities:
@@ -65,6 +67,7 @@ async def async_setup_entry(
                 continue
             entity = metric_entities.get(identity)
             if entity is not None and entity.hass is not None:
+                receiver.diagnostics.inc("entity_state_writes")
                 entity.async_write_ha_state()
 
     @callback
@@ -92,6 +95,7 @@ async def async_setup_entry(
             return
 
         known_entities.add(identity)
+        receiver.diagnostics.inc("entities_created")
         entity = AntPlusSensor(receiver, device, metric_key, timeout)
         metric_entities[identity] = entity
         async_add_entities(
@@ -102,6 +106,7 @@ async def async_setup_entry(
 
     def metric_changed(device: AntDevice, metric_key: str) -> None:
         nonlocal flush_scheduled
+        receiver.diagnostics.inc("metric_callbacks")
         identity = (device.device_id, metric_key)
         should_schedule = False
         with pending_lock:
