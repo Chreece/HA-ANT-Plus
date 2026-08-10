@@ -11,6 +11,7 @@ from homeassistant.core import Event, HomeAssistant, callback
 from .adapter import AntAdapterManager, AntUsbAdapter
 from .const import (
     REMOTE_ADAPTER_CAPTURE_STATE_EVENT,
+    REMOTE_ADAPTER_CONTROL_RESULT_EVENT,
     REMOTE_GATEWAY_HELLO_EVENT,
     REMOTE_GATEWAY_STATUS_EVENT,
     REMOTE_PACKET_EVENT,
@@ -134,6 +135,7 @@ def async_register_remote_listener(
             gateway_id,
             adapters,
             reconcile_capture=True,
+            control_protocol=int(data.get("control_protocol", 0) or 0),
         )
         _LOGGER.info(
             "Remote ANT+ gateway connected: %s (%d adapter(s))",
@@ -146,7 +148,19 @@ def async_register_remote_listener(
         data = event.data
         gateway_id = str(data.get("gateway_id", "")).strip() or "unknown"
         adapters = _parse_adapters(data.get("adapters", []), gateway_id)
-        adapter_manager.update_remote_gateway(gateway_id, adapters)
+        adapter_manager.update_remote_gateway(
+            gateway_id,
+            adapters,
+            control_protocol=int(data.get("control_protocol", 0) or 0),
+        )
+
+    @callback
+    def handle_control_result(event: Event) -> None:
+        data = event.data
+        gateway_id = str(data.get("gateway_id", "")).strip()
+        if not gateway_id:
+            return
+        adapter_manager.resolve_remote_control_result(data)
 
     @callback
     def handle_capture_state(event: Event) -> None:
@@ -178,11 +192,16 @@ def async_register_remote_listener(
         REMOTE_ADAPTER_CAPTURE_STATE_EVENT,
         handle_capture_state,
     )
+    unsub_control_result = hass.bus.async_listen(
+        REMOTE_ADAPTER_CONTROL_RESULT_EVENT,
+        handle_control_result,
+    )
 
     def unsubscribe() -> None:
         unsub_packet()
         unsub_hello()
         unsub_status()
         unsub_capture_state()
+        unsub_control_result()
 
     return unsubscribe

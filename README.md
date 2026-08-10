@@ -34,9 +34,19 @@ Other ANT adapters may work with OpenANT when added manually, but they are **not
 
 ## ANT+ profiles
 
-The integration contains curated decoding for heart rate, power, fitness equipment, bike cadence, bike speed, combined bike speed/cadence and stride speed/distance. It also attempts to reuse OpenANT parsers for additional profiles when they are available. Unknown/unsupported pages are retained as disabled diagnostic raw-data entities rather than silently discarded.
+HA ANT+ uses **two independent parser adapters on the same packet stream**:
 
-Because ANT+ devices vary in the pages they transmit, available entities depend on the sensor and its current operating mode.
+1. **Native ANT+ adapter** — maintained by this integration. It recognizes the complete in-project ANT+ device-type catalogue, exposes safe common pages and bounded raw diagnostics for every recognized profile, and provides curated semantic decoding where the byte layout is implemented.
+2. **OpenANT adapter** — reuses every parser actually shipped by the pinned OpenANT version without allocating another ANT radio channel. It fills semantic fields that the native adapter does not yet provide.
+
+When both adapters expose the same metric, the native HA ANT+ value wins. OpenANT fills only missing metrics.
+
+The integration also contains a public-documentation capability catalogue for known ANT+ profile families, including controls/timer commands, FE/FE-C, racquet session markers, muscle-oxygen session/lap markers, tracker assets, shifting function-set events, Extended Display, suspension, dropper, radar, lights, weight/body composition and more. Active protocols such as ANT-FS, page requests and control commands are identified explicitly rather than being misrepresented as passive sensor data.
+
+Unknown or not-yet-semantic pages remain available through one disabled, bounded raw diagnostic entity per device/profile. They never create an unbounded entity per ANT data page.
+
+Because ANT+ devices vary in the pages they transmit, available entities depend on the sensor, firmware and current operating mode.
+
 
 ## Installation
 
@@ -123,3 +133,19 @@ MIT — see [LICENSE](LICENSE).
 ## Trademark notice
 
 ANT and ANT+ are trademarks of Garmin Canada Inc. This project is an independent community integration and is not affiliated with or endorsed by Garmin, Dynastream, the ANT+ Alliance, or Home Assistant/Open Home Foundation.
+
+### Events and active ANT+ controls
+
+From 2026.8.2, event-oriented ANT+ packets are exposed on the Home Assistant event bus as `antplus_event`. The event payload includes the ANT device/profile identity plus semantic event data. Supported semantic events currently include Controls Device commands (menu, select/back/home, timer start/stop/reset, lap and length), Shifting changes, and Dropper Seatpost lock/unlock changes.
+
+Active controls are created only for profiles with a verified command implementation and only become available while an adapter that has actually received the device is active. Fitness Equipment (FE-C) exposes Target Power and Basic Resistance. LEV exposes assist/regenerative level, front/rear gear command, wheel circumference, command manufacturer ID, lights, high beam and turn signals. Dropper Seatpost exposes valve unlock/lock and stored unlock delay. Tire Pressure Monitor exposes barometric/low/high pressure settings and sensor position. Commands are routed through the local ANT USB adapter or the exact remote HA ANT+ gateway/adapter that observed the device. Remote gateways advertise a control protocol and return a correlated success/error result for every command, so HA does not treat fire-and-forget delivery as success. Advanced actions `antplus.send_raw_control` and `antplus.request_data_page` use this same confirmed local/remote route.
+
+Example event trigger:
+
+```yaml
+trigger:
+  - platform: event
+    event_type: antplus_event
+    event_data:
+      event: lap
+```

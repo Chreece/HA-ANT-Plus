@@ -23,7 +23,6 @@ from .const import (
     DEVICE_TYPE_STRIDE_SPEED,
 )
 from .models import AntDevice, AntMetric
-from .openant_bridge import OpenAntParserAdapter, supported_profile_types
 
 
 def _metric(
@@ -53,10 +52,10 @@ def _metric(
     )
 
 
-def decode_packet(
+def decode_native_packet(
     device: AntDevice, device_type: int, payload: bytes
 ) -> list[AntMetric]:
-    """Decode one 8-byte ANT+ payload."""
+    """Decode one packet with HA ANT+'s native/documented backend."""
     if len(payload) != 8:
         return []
 
@@ -82,37 +81,6 @@ def decode_packet(
             availability_mode="device",
         ),
     ]
-
-    # Reuse every parser shipped by OpenANT without allocating another
-    # radio channel. Parser state is retained per ANT device/profile.
-    # For profiles with our own curated decoder, prefer that output over
-    # OpenANT's lower-level dataclass fields. Other supported profiles still
-    # use the upstream bridge so we keep broad profile coverage.
-    curated_profiles = {
-        DEVICE_TYPE_HEART_RATE,
-        DEVICE_TYPE_POWER,
-        DEVICE_TYPE_FITNESS_EQUIPMENT,
-        DEVICE_TYPE_BIKE_SPEED,
-        DEVICE_TYPE_BIKE_CADENCE,
-        DEVICE_TYPE_BIKE_SPEED_CADENCE,
-        DEVICE_TYPE_SHIFTING,
-        DEVICE_TYPE_STRIDE_SPEED,
-    }
-
-    if (
-        device_type in supported_profile_types()
-        and device_type not in curated_profiles
-    ):
-        adapters = device.decoder_state.setdefault("openant_adapters", {})
-        adapter = adapters.get(device_type)
-        if adapter is None:
-            try:
-                adapter = OpenAntParserAdapter(device_type, device.device_id)
-            except Exception:
-                adapter = False
-            adapters[device_type] = adapter
-        if adapter:
-            metrics.extend(adapter.feed(payload))
 
     # Common pages are only safe to decode for known standardized ANT+
     # device types. Proprietary profiles can reuse these page numbers.
@@ -140,6 +108,14 @@ def decode_packet(
     return metrics
 
 
+
+def decode_packet(
+    device: AntDevice, device_type: int, payload: bytes
+) -> list[AntMetric]:
+    """Decode one ANT+ packet through both installed parser adapters."""
+    from .decoder_adapters import decode_with_adapters
+    return decode_with_adapters(device, device_type, payload)
+
 def _profile_label(device_type: int) -> str:
     from .const import DEVICE_TYPE_NAMES
     return DEVICE_TYPE_NAMES.get(device_type, f"Profile {device_type}")
@@ -149,7 +125,28 @@ def _decode_common(data: bytes) -> list[AntMetric]:
     metrics: list[AntMetric] = []
     page = data[0] & 0x7F
 
-    if page == 82:
+    if page == 80:
+        hardware_revision = data[3]
+        manufacturer_id = data[4] | (data[5] << 8)
+        model_number = data[6] | (data[7] << 8)
+        if hardware_revision != 0xFF:
+            metrics.append(_metric("hardware_revision", "Hardware Revision", hardware_revision, icon="mdi:chip", entity_category=EntityCategory.DIAGNOSTIC, enabled_default=False, availability_mode="device"))
+        if manufacturer_id != 0xFFFF:
+            metrics.append(_metric("manufacturer_id", "Manufacturer ID", manufacturer_id, icon="mdi:factory", entity_category=EntityCategory.DIAGNOSTIC, enabled_default=False, availability_mode="device"))
+        if model_number != 0xFFFF:
+            metrics.append(_metric("model_number", "Model Number", model_number, icon="mdi:information-outline", entity_category=EntityCategory.DIAGNOSTIC, enabled_default=False, availability_mode="device"))
+
+    elif page == 81:
+        software_supplemental = data[2]
+        software_main = data[3]
+        serial_number = int.from_bytes(data[4:8], "little")
+        if not (software_supplemental == 0xFF and software_main == 0xFF):
+            software = str(software_main / 10) if software_supplemental == 0xFF else str((software_main * 100 + software_supplemental) / 1000)
+            metrics.append(_metric("software_revision", "Software Revision", software, icon="mdi:code-tags", entity_category=EntityCategory.DIAGNOSTIC, enabled_default=False, availability_mode="device"))
+        if serial_number != 0xFFFFFFFF:
+            metrics.append(_metric("serial_number", "Serial Number", serial_number, icon="mdi:identifier", entity_category=EntityCategory.DIAGNOSTIC, enabled_default=False, availability_mode="device"))
+
+    elif page == 82:
         # ANT+ Common Page 82 battery status. Not every device implements it.
         fractional = data[6] / 256.0
         coarse = data[7] & 0x0F
@@ -487,6 +484,28 @@ def _decode_fitness_equipment(device: AntDevice, data: bytes) -> list[AntMetric]
                     "power", "measurement", "mdi:flash"
                 )
             )
+    elif page == 0x47:
+        command_id = data[1]
+        status_raw = data[3]
+        status_name = {
+            0: "Pass",
+            1: "Fail",
+            2: "Not Supported",
+            3: "Rejected",
+            4: "Pending",
+            255: "Uninitialized",
+        }.get(status_raw, f"Unknown ({status_raw})")
+        metrics.extend([
+            _metric("last_command_id", "Last Command ID", command_id, icon="mdi:identifier", entity_category=EntityCategory.DIAGNOSTIC, enabled_default=False),
+            _metric("command_status", "Command Status", status_name, icon="mdi:check-decagram-outline", entity_category=EntityCategory.DIAGNOSTIC),
+        ])
+        if command_id == 0x30 and data[7] != 0xFF:
+            metrics.append(_metric("confirmed_basic_resistance", "Confirmed Basic Resistance", round(data[7] / 2.0, 1), "%", state_class="measurement", icon="mdi:gauge", entity_category=EntityCategory.DIAGNOSTIC))
+        elif command_id == 0x31:
+            raw_power = int.from_bytes(data[6:8], "little")
+            if raw_power != 0xFFFF:
+                metrics.append(_metric("confirmed_target_power", "Confirmed Target Power", round(raw_power / 4.0, 2), "W", "power", "measurement", "mdi:flash", EntityCategory.DIAGNOSTIC))
+
     return [m for m in metrics if m is not None]
 
 

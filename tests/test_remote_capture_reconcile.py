@@ -14,7 +14,8 @@ def test_gateway_status_does_not_force_capture_reconciliation():
     end = source.index("def handle_capture_state", start)
     body = source[start:end]
 
-    assert "update_remote_gateway(gateway_id, adapters)" in body
+    assert "update_remote_gateway(" in body
+    assert "control_protocol=" in body
     assert "reconcile_capture=True" not in body
 
 

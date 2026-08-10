@@ -1,0 +1,54 @@
+send_raw_control:
+  name: Send raw ANT+ control
+  description: Send an exactly 8-byte acknowledged ANT+ payload through the local or remote adapter that has seen the target device.
+  fields:
+    device_id:
+      name: Device ID
+      required: true
+      selector: {number: {min: 0, max: 65535, mode: box}}
+    device_type:
+      name: Device type
+      required: true
+      selector: {number: {min: 0, max: 255, mode: box}}
+    transmission_type:
+      name: Transmission type
+      required: false
+      selector: {number: {min: 0, max: 255, mode: box}}
+    period:
+      name: Channel period
+      description: ANT channel period in 1/32768-second units for this profile.
+      required: true
+      selector: {number: {min: 1, max: 65535, mode: box}}
+    payload:
+      name: Payload
+      description: Exactly eight bytes as hexadecimal, for example '46FFFFFFFF015001'.
+      required: true
+      selector: {text: {}}
+request_data_page:
+  name: Request ANT+ data page
+  description: Send ANT+ Common Page 70 to request a page from a known device. Uses the same confirmed local/remote transmit route as semantic controls.
+  fields:
+    device_id:
+      name: Device ID
+      required: true
+      selector: {number: {min: 0, max: 65535, mode: box}}
+    device_type:
+      name: Device type
+      required: true
+      selector: {number: {min: 0, max: 255, mode: box}}
+    transmission_type:
+      name: Transmission type
+      required: false
+      selector: {number: {min: 0, max: 255, mode: box}}
+    period:
+      name: Channel period
+      required: true
+      selector: {number: {min: 1, max: 65535, mode: box}}
+    page:
+      name: Requested page
+      required: true
+      selector: {number: {min: 0, max: 255, mode: box}}
+    count:
+      name: Number of responses
+      default: 1
+      selector: {number: {min: 1, max: 127, mode: box}}

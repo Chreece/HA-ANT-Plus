@@ -39,6 +39,7 @@ MAX_METRICS_PER_DEVICE = 96
 DeviceCallback = Callable[[AntDevice], None]
 MetricCallback = Callable[[AntDevice, str], None]
 StateCallback = Callable[[], None]
+PacketCallback = Callable[[AntDevice, int, int, bytes, str], None]
 
 
 class AntPlusReceiver:
@@ -55,6 +56,7 @@ class AntPlusReceiver:
         self._device_callbacks: list[DeviceCallback] = []
         self._metric_callbacks: list[MetricCallback] = []
         self._state_callbacks: list[StateCallback] = []
+        self._packet_callbacks: list[PacketCallback] = []
 
         # Unconfirmed RF discoveries. A tuple is promoted only after repeated
         # observations, preventing one malformed wildcard-scan packet from
@@ -103,6 +105,11 @@ class AntPlusReceiver:
     def add_state_callback(self, callback: StateCallback) -> Callable[[], None]:
         self._state_callbacks.append(callback)
         return lambda: self._remove_callback(self._state_callbacks, callback)
+
+    def add_packet_callback(self, callback: PacketCallback) -> Callable[[], None]:
+        """Register for confirmed raw ANT+ packets after identity validation."""
+        self._packet_callbacks.append(callback)
+        return lambda: self._remove_callback(self._packet_callbacks, callback)
 
     @staticmethod
     def _remove_callback(callbacks: list, callback: Callable) -> None:
@@ -492,6 +499,8 @@ class AntPlusReceiver:
                 new_profile = True
 
             device.transmission_types.add(transmission_type)
+            profile_tx = device.decoder_state.setdefault("profile_transmission_types", {})
+            profile_tx.setdefault(device_type, set()).add(transmission_type)
             device.last_seen = datetime.now(timezone.utc)
 
             # Keep source information diagnostic-only. It does not participate
@@ -547,6 +556,12 @@ class AntPlusReceiver:
                     or old.availability_mode != metric.availability_mode
                 ):
                     changed_metrics.append(metric.key)
+
+        for callback in tuple(self._packet_callbacks):
+            try:
+                callback(device, device_type, transmission_type, payload, source)
+            except Exception:
+                _LOGGER.debug("ANT+ packet callback failed", exc_info=True)
 
         if new_device:
             _LOGGER.info(
