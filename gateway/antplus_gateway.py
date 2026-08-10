@@ -386,6 +386,7 @@ class AntScanner:
 
     def stop(self) -> None:
         with self._lock:
+            was_enabled = self._enabled or self.running
             self._enabled = False
             node = self._node
         if node is not None:
@@ -393,6 +394,8 @@ class AntScanner:
                 node.stop()
             except Exception:
                 _LOGGER.debug("Error stopping ANT node", exc_info=True)
+        if was_enabled:
+            self._report_state(False)
 
     def _refresh_runtime_adapter(self) -> None:
         """Refresh bus/address without changing physical adapter identity."""
@@ -652,6 +655,16 @@ class HAConnection:
             scanner.adapter = adapter
             scanner.start()
 
+    def capture_states(self) -> dict[str, bool]:
+        """Return authoritative runtime capture state for every adapter."""
+        return {
+            adapter_id: bool(
+                (scanner := self._scanners.get(adapter_id)) is not None
+                and scanner.running
+            )
+            for adapter_id in self._adapters
+        }
+
     async def refresh_adapters(self, websocket, *, force: bool = False) -> None:
         loop = asyncio.get_running_loop()
         detected = await loop.run_in_executor(None, detect_ant_adapters)
@@ -704,6 +717,7 @@ class HAConnection:
                     "control_protocol": CONTROL_PROTOCOL,
                     "telemetry_protocol": TELEMETRY_PROTOCOL,
                     "adapters": list(current.values()),
+                    "capture_states": self.capture_states(),
                 },
             },
         )
@@ -793,6 +807,7 @@ class HAConnection:
                         "control_protocol": CONTROL_PROTOCOL,
                         "telemetry_protocol": TELEMETRY_PROTOCOL,
                         "adapters": list(self._adapters.values()),
+                        "capture_states": self.capture_states(),
                     },
                 },
             )

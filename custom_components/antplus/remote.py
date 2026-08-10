@@ -284,9 +284,23 @@ def async_register_remote_listener(
         # gateway can deliver hundreds of packets per second from multi-profile
         # devices such as Stryd; enqueue only and let the dedicated worker do
         # validation, OpenANT parsing and receiver updates.
+        active_adapters: set[str] = set()
         for packet in packets:
             if isinstance(packet, dict):
+                adapter_id = str(packet.get("adapter_id", "")).strip()
+                if adapter_id:
+                    active_adapters.add(adapter_id)
                 packet_worker.enqueue(gateway_id, packet)
+
+        # Receiving RF data is itself authoritative proof that this remote
+        # physical adapter is capturing. This closes the race where a slow ANT
+        # handshake can outlive HA's optimistic Capture confirmation timeout.
+        for adapter_id in active_adapters:
+            adapter_manager.update_remote_capture_state(
+                gateway_id,
+                adapter_id,
+                True,
+            )
 
     @callback
     def handle_gateway_hello(event: Event) -> None:
@@ -303,6 +317,12 @@ def async_register_remote_listener(
             reconcile_capture=True,
             control_protocol=int(data.get("control_protocol", 0) or 0),
         )
+        capture_states = data.get("capture_states")
+        if isinstance(capture_states, dict):
+            for stable_key, enabled in capture_states.items():
+                adapter_manager.update_remote_capture_state(
+                    gateway_id, str(stable_key), bool(enabled)
+                )
         _LOGGER.info(
             "Remote ANT+ gateway connected: %s (%d adapter(s))",
             gateway_id,
@@ -319,6 +339,12 @@ def async_register_remote_listener(
             adapters,
             control_protocol=int(data.get("control_protocol", 0) or 0),
         )
+        capture_states = data.get("capture_states")
+        if isinstance(capture_states, dict):
+            for stable_key, enabled in capture_states.items():
+                adapter_manager.update_remote_capture_state(
+                    gateway_id, str(stable_key), bool(enabled)
+                )
 
     @callback
     def handle_control_result(event: Event) -> None:

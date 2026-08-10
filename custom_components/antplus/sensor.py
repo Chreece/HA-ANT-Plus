@@ -49,6 +49,7 @@ async def async_setup_entry(
     pending_metric_updates: set[tuple[int, str]] = set()
     pending_lock = threading.Lock()
     flush_scheduled = False
+    availability_cache: dict[tuple[int, str], bool] = {}
 
     @callback
     def flush_metric_updates() -> None:
@@ -67,6 +68,7 @@ async def async_setup_entry(
                 continue
             entity = metric_entities.get(identity)
             if entity is not None and entity.hass is not None:
+                availability_cache[identity] = entity.available
                 receiver.diagnostics.inc("entity_state_writes")
                 entity.async_write_ha_state()
 
@@ -98,6 +100,7 @@ async def async_setup_entry(
         receiver.diagnostics.inc("entities_created")
         entity = AntPlusSensor(receiver, device, metric_key, timeout)
         metric_entities[identity] = entity
+        availability_cache[identity] = entity.available
         async_add_entities(
             [entity],
             update_before_add=False,
@@ -118,6 +121,43 @@ async def async_setup_entry(
             hass.loop.call_soon_threadsafe(schedule_metric_flush)
 
     entry.async_on_unload(receiver.add_metric_callback(metric_changed))
+
+    @callback
+    def refresh_availability_states(_now=None) -> None:
+        """Refresh only entities whose HA-visible availability changed."""
+        receiver.diagnostics.inc("global_sensor_refreshes")
+        receiver.diagnostics.inc("global_sensor_refresh_checks", len(metric_entities))
+        writes = 0
+        for identity, entity in tuple(metric_entities.items()):
+            if entity.hass is None:
+                continue
+            available = entity.available
+            previous = availability_cache.get(identity)
+            availability_cache[identity] = available
+            if previous is None or previous == available:
+                continue
+            writes += 1
+            entity.async_write_ha_state()
+        if writes:
+            receiver.diagnostics.inc("global_sensor_refresh_writes", writes)
+
+    def receiver_state_changed() -> None:
+        receiver.diagnostics.inc("global_sensor_state_callbacks")
+        hass.loop.call_soon_threadsafe(refresh_availability_states)
+
+    # One receiver-state callback and one inactivity timer for the whole sensor
+    # platform. Individual ANT entities must never register their own copies.
+    entry.async_on_unload(receiver.add_state_callback(receiver_state_changed))
+    entry.async_on_unload(
+        async_track_time_interval(
+            hass,
+            refresh_availability_states,
+            timedelta(seconds=5),
+        )
+    )
+
+    receiver.diagnostics.set_gauge("sensor_state_callback_count", 1)
+    receiver.diagnostics.set_gauge("sensor_inactivity_timer_count", 1)
 
     device_registry = dr.async_get(hass)
 
@@ -197,26 +237,10 @@ class AntPlusSensor(AntPlusEntity, SensorEntity):
         return metric.value if metric is not None else None
 
     async def async_added_to_hass(self) -> None:
+        # Live metric writes, receiver-state refreshes and inactivity expiration
+        # are all dispatched once globally by async_setup_entry. Per-entity
+        # callbacks/timers caused severe fanout on multi-profile running pods.
         await super().async_added_to_hass()
-
-        def receiver_changed() -> None:
-            self.hass.loop.call_soon_threadsafe(self.async_write_ha_state)
-
-        # Metric writes are globally coalesced by async_setup_entry. Registering
-        # one receiver callback per entity creates O(metrics x entities) fanout
-        # under multi-profile devices such as running pods.
-        self.async_on_remove(self.receiver.add_state_callback(receiver_changed))
-        @callback
-        def refresh_state(_now) -> None:
-            self.async_write_ha_state()
-
-        self.async_on_remove(
-            async_track_time_interval(
-                self.hass,
-                refresh_state,
-                timedelta(seconds=5),
-            )
-        )
 
 
 

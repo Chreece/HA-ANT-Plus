@@ -56,7 +56,7 @@ REMOTE_ADAPTER_MISSING_GRACE_SECONDS = 20.0
 
 # How long HA keeps showing the requested Capture state while waiting
 # for the physical adapter/gateway to confirm what actually happened.
-CAPTURE_CONFIRM_TIMEOUT_SECONDS = 15.0
+CAPTURE_CONFIRM_TIMEOUT_SECONDS = 30.0
 
 AdapterCallback = Callable[[str], None]
 
