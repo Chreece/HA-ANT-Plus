@@ -19,6 +19,10 @@ from .models import AntMetric
 
 _LOGGER = logging.getLogger(__name__)
 
+# OpenANT logs every power packet at INFO. Under high-rate sensors this can
+# flood HA logs and add avoidable MainThread I/O; keep warnings/errors only.
+logging.getLogger("openant.devices.power_meter").setLevel(logging.WARNING)
+
 
 class _FakeChannel:
     """No-op ANT channel used only to initialise OpenANT parser classes."""
