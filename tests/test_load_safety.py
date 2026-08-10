@@ -41,9 +41,11 @@ def test_per_entity_refresh_is_not_one_hz():
 
 def test_gateway_uses_bounded_coalescing():
     source = Path("gateway/antplus_gateway.py").read_text()
-    assert "MAX_REMOTE_BATCH_PACKETS = 256" in source
+    assert "MAX_REMOTE_BATCH_PACKETS = 128" in source
     assert "MAX_REMOTE_DRAIN_PACKETS = 2048" in source
     assert "def _coalesce_packets(" in source
+    assert "class GatewayPacketBuffer" in source
+    assert "self.packet_queue.drain(MAX_REMOTE_DRAIN_PACKETS)" in source
     assert "packets = _coalesce_packets(packets)" in source
 
 
