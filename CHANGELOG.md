@@ -1,3 +1,19 @@
+## 2026.8.9
+
+- Replace per-sensor receiver-state callbacks with one integration-level callback, eliminating callback fanout as multi-profile devices create many entities.
+- Replace one 5-second inactivity timer per ANT sensor with one integration-level timer and only write HA state when availability actually changes.
+- Add diagnostics counters/gauges for global sensor refreshes, checks, writes, callback count and inactivity-timer count.
+- Treat incoming remote RF packets as authoritative Capture-ON confirmation, preventing slow ANT handshakes from leaving the HA switch falsely reverted to OFF while packets are flowing.
+- Include authoritative per-adapter `capture_states` in gateway hello/status messages, report Capture OFF when a gateway scanner stops, and increase the confirmation grace period to 30 seconds.
+- Include the capture-state reconciliation capability without changing the existing telemetry/control protocol versions, preserving backward compatibility.
+
+## 2026.8.8
+
+- Add diagnostics-only instrumentation for ANT+ performance investigations.
+- Add `antplus.dump_diagnostics` to log packet/decode/OpenANT/metric/entity counters, timings, queue gauges, and all live Python thread stacks without external profilers or Unix signals.
+- Add `antplus.reset_diagnostics` so a reproduction can start from zeroed counters.
+- No ANT transport, decoding, coalescing, event, control, or gateway behavior is changed in this release.
+
 ## 2026.8.7
 
 - Add two-sided ANT+ telemetry coalescing for high-rate remote sensors: the gateway now collapses RF repetitions before WebSocket transport and HA independently coalesces received telemetry before decoding.

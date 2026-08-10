@@ -21,6 +21,5 @@ def test_ha_metric_writes_are_globally_coalesced():
     source = Path("custom_components/antplus/sensor.py").read_text()
     assert "pending_metric_updates" in source
     assert "hass.loop.call_later(0.1, flush_metric_updates)" in source
-    assert "one receiver callback per entity" in source
-    # There should only be one registration in setup, not one in every sensor.
     assert source.count("receiver.add_metric_callback(metric_changed)") == 1
+    # There should only be one registration in setup, not one in every sensor.
