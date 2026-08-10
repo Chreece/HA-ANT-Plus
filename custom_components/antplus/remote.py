@@ -134,6 +134,7 @@ class RemotePacketWorker:
         self._telemetry: OrderedDict[tuple, tuple[str, dict[str, Any]]] = OrderedDict()
         self._events: deque[tuple[str, dict[str, Any]]] = deque(maxlen=REMOTE_EVENT_QUEUE_MAX)
         self._dropped = 0
+        self._diagnostics = receiver.diagnostics
         self._thread = threading.Thread(
             target=self._run,
             name="antplus-remote-packet-worker",
@@ -147,15 +148,19 @@ class RemotePacketWorker:
 
     def enqueue(self, gateway_id: str, packet: dict[str, Any]) -> None:
         """Store newest telemetry while preserving discrete event packets."""
+        self._diagnostics.inc("remote_packets_received")
         item = (gateway_id, dict(packet))
         with self._lock:
             if _remote_packet_is_event(packet):
+                self._diagnostics.inc("remote_event_packets")
                 if len(self._events) >= REMOTE_EVENT_QUEUE_MAX:
                     self._dropped += 1
                 self._events.append(item)
             else:
+                self._diagnostics.inc("remote_telemetry_packets")
                 key = _remote_packet_key(gateway_id, packet)
                 if key in self._telemetry:
+                    self._diagnostics.inc("remote_coalesced_replacements")
                     self._telemetry.pop(key, None)
                 elif len(self._telemetry) >= REMOTE_PACKET_QUEUE_MAX:
                     self._telemetry.popitem(last=False)
@@ -170,6 +175,8 @@ class RemotePacketWorker:
                     "Remote ANT+ coalescer dropped %d stale packet(s)",
                     self._dropped,
                 )
+        self._diagnostics.set_gauge("remote_pending_telemetry", len(self._telemetry))
+        self._diagnostics.set_gauge("remote_pending_events", len(self._events))
         self._wake.set()
 
     def stop(self) -> None:
@@ -188,19 +195,26 @@ class RemotePacketWorker:
 
     def _decode_item(self, item: tuple[str, dict[str, Any]]) -> None:
         gateway_id, packet = item
+        started = time.perf_counter()
         try:
             _process_remote_packet(self._receiver, packet, gateway_id)
         except (KeyError, TypeError, ValueError) as err:
+            self._diagnostics.inc("remote_invalid_packets")
             _LOGGER.warning(
                 "Ignoring invalid ANT+ packet from gateway %s: %s",
                 gateway_id,
                 err,
             )
         except Exception:
+            self._diagnostics.inc("remote_decode_exceptions")
             _LOGGER.exception(
                 "Unexpected error decoding ANT+ packet from gateway %s",
                 gateway_id,
             )
+        finally:
+            elapsed = time.perf_counter() - started
+            self._diagnostics.inc("remote_packets_decoded")
+            self._diagnostics.add_time("remote_decode_dispatch_total", elapsed)
 
     def _run(self) -> None:
         while not self._stop.is_set():
@@ -262,6 +276,9 @@ def async_register_remote_listener(
             packets = [data]
         elif not isinstance(packets, list):
             return
+
+        receiver.diagnostics.inc("remote_bus_events")
+        receiver.diagnostics.inc("remote_bus_packets", len(packets))
 
         # Never decode ANT packets in Home Assistant's event loop. The remote
         # gateway can deliver hundreds of packets per second from multi-profile

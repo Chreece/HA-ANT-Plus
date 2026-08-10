@@ -24,6 +24,8 @@ async def async_setup_entry(
 ) -> bool:
     """Set up HA ANT+."""
     receiver = AntPlusReceiver()
+    receiver.diagnostics.start_watchdog()
+    entry.async_on_unload(receiver.diagnostics.stop)
     adapter_manager = AntAdapterManager(hass, entry, receiver)
     receiver.adapter_manager = adapter_manager
 

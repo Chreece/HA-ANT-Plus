@@ -7,9 +7,12 @@ from homeassistant.helpers import config_validation as cv
 
 from .const import DOMAIN
 from .control import parse_raw_payload, request_data_page_payload
+from .diagnostics import log_diagnostics
 
 SERVICE_SEND_RAW_CONTROL = "send_raw_control"
 SERVICE_REQUEST_DATA_PAGE = "request_data_page"
+SERVICE_DUMP_DIAGNOSTICS = "dump_diagnostics"
+SERVICE_RESET_DIAGNOSTICS = "reset_diagnostics"
 
 COMMON = {
     vol.Required("device_id"): vol.All(vol.Coerce(int), vol.Range(min=0, max=65535)),
@@ -49,11 +52,24 @@ def async_register_services(hass: HomeAssistant, receiver) -> None:
             payload=request_data_page_payload(call.data["page"], call.data["count"]),
         )
 
+    async def dump_diagnostics(_call: ServiceCall) -> None:
+        log_diagnostics(receiver.diagnostics)
+
+    async def reset_diagnostics(_call: ServiceCall) -> None:
+        receiver.diagnostics.reset()
+
     hass.services.async_register(DOMAIN, SERVICE_SEND_RAW_CONTROL, send_raw, schema=SEND_RAW_SCHEMA)
     hass.services.async_register(DOMAIN, SERVICE_REQUEST_DATA_PAGE, request_page, schema=REQUEST_PAGE_SCHEMA)
+    hass.services.async_register(DOMAIN, SERVICE_DUMP_DIAGNOSTICS, dump_diagnostics)
+    hass.services.async_register(DOMAIN, SERVICE_RESET_DIAGNOSTICS, reset_diagnostics)
 
 
 def async_unregister_services(hass: HomeAssistant) -> None:
-    for service in (SERVICE_SEND_RAW_CONTROL, SERVICE_REQUEST_DATA_PAGE):
+    for service in (
+        SERVICE_SEND_RAW_CONTROL,
+        SERVICE_REQUEST_DATA_PAGE,
+        SERVICE_DUMP_DIAGNOSTICS,
+        SERVICE_RESET_DIAGNOSTICS,
+    ):
         if hass.services.has_service(DOMAIN, service):
             hass.services.async_remove(DOMAIN, service)
