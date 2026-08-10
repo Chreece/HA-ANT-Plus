@@ -62,13 +62,11 @@ def decode_packet(
 
     page = payload[0] & 0x7F
     metrics: list[AntMetric] = [
-        # Lossless diagnostic fallback: retain the latest payload for each
-        # distinct device type + ANT data page instead of allowing one page
-        # to overwrite another.
+        # Keep raw diagnostics bounded: one raw entity per device/profile.
         _metric(
-            f"profile_{device_type}_page_{page}_raw",
-            f"{_profile_label(device_type)} Page {page} Raw Data",
-            " ".join(f"{byte:02X}" for byte in payload),
+            f"profile_{device_type}_raw",
+            f"{_profile_label(device_type)} Raw Data",
+            f"page={page} " + " ".join(f"{byte:02X}" for byte in payload),
             icon="mdi:code-brackets",
             entity_category=EntityCategory.DIAGNOSTIC,
             enabled_default=False,

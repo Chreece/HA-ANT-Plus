@@ -48,6 +48,50 @@ CAPTURE_START_ATTEMPTS = 3
 CAPTURE_RETRY_DELAY = 2.0
 
 _LOGGER = logging.getLogger("ha_antplus_gateway")
+
+
+MAX_REMOTE_BATCH_PACKETS = 256
+MAX_REMOTE_DRAIN_PACKETS = 2048
+
+
+def _packet_coalesce_key(packet: dict[str, Any]) -> tuple:
+    payload = str(packet.get("payload", ""))
+    try:
+        page = int(payload[:2], 16) & 0x7F if len(payload) >= 2 else -1
+    except ValueError:
+        page = -1
+
+    return (
+        packet.get("adapter_id"),
+        packet.get("device_id"),
+        packet.get("device_type"),
+        packet.get("transmission_type"),
+        page,
+    )
+
+
+def _coalesce_packets(
+    packets: list[dict[str, Any]],
+    limit: int = MAX_REMOTE_BATCH_PACKETS,
+) -> list[dict[str, Any]]:
+    # Keep only the newest packet per adapter/sensor/profile/page.
+    latest: dict[tuple, dict[str, Any]] = {}
+    order: list[tuple] = []
+
+    for packet in packets:
+        key = _packet_coalesce_key(packet)
+        if key in latest:
+            try:
+                order.remove(key)
+            except ValueError:
+                pass
+        latest[key] = packet
+        order.append(key)
+
+    if len(order) > limit:
+        order = order[-limit:]
+
+    return [latest[key] for key in order]
 _NODE_CREATE_LOCK = threading.Lock()
 
 
@@ -76,7 +120,7 @@ def load_settings() -> Settings:
         ha_url=ha_url,
         token=token,
         gateway_id=gateway_id,
-        batch_interval=float(os.environ.get("BATCH_INTERVAL", "0.25")),
+        batch_interval=float(os.environ.get("BATCH_INTERVAL", "0.5")),
         reconnect_delay=float(os.environ.get("RECONNECT_DELAY", "5")),
     )
 
@@ -439,8 +483,8 @@ class AntScanner:
 class HAConnection:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self.packet_queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=10000)
-        self.state_queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=1000)
+        self.packet_queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=2048)
+        self.state_queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=2048)
         self.next_id = 1
         self._adapters: dict[str, dict[str, Any]] = {}
         self._scanners: dict[str, AntScanner] = {}
@@ -589,11 +633,12 @@ class HAConnection:
         while True:
             await asyncio.sleep(self.settings.batch_interval)
             packets: list[dict[str, Any]] = []
-            while len(packets) < 250:
+            while len(packets) < MAX_REMOTE_DRAIN_PACKETS:
                 try:
                     packets.append(self.packet_queue.get_nowait())
                 except queue.Empty:
                     break
+            packets = _coalesce_packets(packets)
             if packets:
                 await self.send(
                     websocket,

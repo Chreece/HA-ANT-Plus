@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
@@ -125,6 +127,7 @@ async def async_cleanup_legacy_entities(
         if (
             unique_id in obsolete_unique_ids
             or any(unique_id.endswith(suffix) for suffix in unwanted_suffixes)
+            or re.search(r"_profile_\d+_page_\d+_raw$", unique_id) is not None
         ):
             entity_registry.async_remove(entity.entity_id)
 

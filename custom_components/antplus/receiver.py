@@ -31,6 +31,10 @@ SUPPORTED_LOCAL_USB_IDS = {("0FCF", "1008"), ("0FCF", "1009")}
 DISCOVERY_CONFIRM_PACKETS = 5
 DISCOVERY_CONFIRM_WINDOW_SECONDS = 10.0
 DISCOVERY_CANDIDATE_TTL_SECONDS = 30.0
+MAX_DISCOVERY_CANDIDATES = 256
+MAX_CONFIRMED_DEVICES = 256
+MAX_PROFILES_PER_DEVICE = 16
+MAX_METRICS_PER_DEVICE = 96
 
 DeviceCallback = Callable[[AntDevice], None]
 MetricCallback = Callable[[AntDevice, str], None]
@@ -339,6 +343,15 @@ class AntPlusReceiver:
         candidate = self._discovery_candidates.get(key)
 
         if candidate is None:
+            if len(self._discovery_candidates) >= MAX_DISCOVERY_CANDIDATES:
+                oldest_key = min(
+                    self._discovery_candidates,
+                    key=lambda item: float(
+                        self._discovery_candidates[item]["last_seen"]
+                    ),
+                )
+                self._discovery_candidates.pop(oldest_key, None)
+
             self._discovery_candidates[key] = {
                 "count": 1,
                 "first_seen": now_ts,
@@ -455,11 +468,26 @@ class AntPlusReceiver:
                 return
 
             if device is None:
+                if len(self.devices) >= MAX_CONFIRMED_DEVICES:
+                    _LOGGER.warning(
+                        "ANT+ confirmed-device safety limit reached (%s); "
+                        "ignoring new device %s",
+                        MAX_CONFIRMED_DEVICES,
+                        device_id,
+                    )
+                    return
                 device = AntDevice(device_id=device_id)
                 self.devices[device_id] = device
                 new_device = True
 
             if device_type not in device.profiles:
+                if len(device.profiles) >= MAX_PROFILES_PER_DEVICE:
+                    _LOGGER.warning(
+                        "ANT+ profile safety limit reached for device %s (%s)",
+                        device_id,
+                        MAX_PROFILES_PER_DEVICE,
+                    )
+                    return
                 device.profiles.add(device_type)
                 new_profile = True
 
@@ -497,9 +525,27 @@ class AntPlusReceiver:
 
             for metric in decode_packet(device, device_type, payload):
                 old = device.metrics.get(metric.key)
+
+                if old is None and len(device.metrics) >= MAX_METRICS_PER_DEVICE:
+                    _LOGGER.warning(
+                        "ANT+ metric safety limit reached for device %s (%s)",
+                        device_id,
+                        MAX_METRICS_PER_DEVICE,
+                    )
+                    continue
+
                 device.metrics[metric.key] = metric
 
-                if old != metric:
+                if old is None or (
+                    old.value != metric.value
+                    or old.unit != metric.unit
+                    or old.device_class != metric.device_class
+                    or old.state_class != metric.state_class
+                    or old.icon != metric.icon
+                    or old.entity_category != metric.entity_category
+                    or old.enabled_default != metric.enabled_default
+                    or old.availability_mode != metric.availability_mode
+                ):
                     changed_metrics.append(metric.key)
 
         if new_device:

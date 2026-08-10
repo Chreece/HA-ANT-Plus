@@ -23,6 +23,8 @@ from .const import (
 from .entity import AntPlusEntity
 from .models import AntDevice
 from .receiver import AntPlusReceiver
+
+MAX_ENTITIES_PER_ANT_DEVICE = 96
 from .subentries import ensure_sensor_subentry
 
 
@@ -52,6 +54,15 @@ async def async_setup_entry(
         device = receiver.devices.get(device_id)
         if device is None or metric_key not in device.metrics:
             return
+
+        device_entity_count = sum(
+            1
+            for known_device_id, _metric_key in known_entities
+            if known_device_id == device_id
+        )
+        if device_entity_count >= MAX_ENTITIES_PER_ANT_DEVICE:
+            return
+
         known_entities.add(identity)
         async_add_entities(
             [AntPlusSensor(receiver, device, metric_key, timeout)],
@@ -164,7 +175,7 @@ class AntPlusSensor(AntPlusEntity, SensorEntity):
             async_track_time_interval(
                 self.hass,
                 refresh_state,
-                timedelta(seconds=1),
+                timedelta(seconds=5),
             )
         )
 
