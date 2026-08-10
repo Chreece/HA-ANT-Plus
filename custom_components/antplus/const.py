@@ -1,7 +1,7 @@
 """Constants for the ANT+ integration."""
 
 DOMAIN = "antplus"
-PLATFORMS = ["sensor", "switch", "button"]
+PLATFORMS = ["sensor", "switch", "button", "number", "select"]
 
 ANTPLUS_NETWORK_NUMBER = 0
 ANTPLUS_RF_FREQUENCY = 57
@@ -15,6 +15,11 @@ REMOTE_ADAPTER_CAPTURE_EVENT = "antplus_adapter_capture"
 REMOTE_ADAPTER_CAPTURE_STATE_EVENT = "antplus_adapter_capture_state"
 REMOTE_GATEWAY_STATUS_EVENT = "antplus_gateway_status"
 REMOTE_CAPTURE_STATE_EVENT = "antplus_capture_state"
+REMOTE_ADAPTER_CONTROL_EVENT = "antplus_adapter_control"
+REMOTE_ADAPTER_CONTROL_RESULT_EVENT = "antplus_adapter_control_result"
+REMOTE_CONTROL_PROTOCOL = 1
+REMOTE_CONTROL_TIMEOUT = 20.0
+ANTPLUS_EVENT = "antplus_event"
 
 DEVICE_TYPE_SYNC = 1
 DEVICE_TYPE_MULTI_SPORT_SPEED_DISTANCE = 15
@@ -30,6 +35,7 @@ DEVICE_TYPE_RUNNING_DYNAMICS = 30
 DEVICE_TYPE_MUSCLE_OXYGEN = 31
 DEVICE_TYPE_SHIFTING = 34
 DEVICE_TYPE_BICYCLE_LIGHTS = 35
+DEVICE_TYPE_EXTENDED_DISPLAY = 38
 DEVICE_TYPE_RADAR = 40
 DEVICE_TYPE_TRACKER = 41
 DEVICE_TYPE_TIRE_PRESSURE = 48
@@ -58,6 +64,7 @@ DEVICE_TYPE_NAMES = {
     31: "Muscle Oxygen",
     34: "Shifting",
     35: "Bicycle Lights",
+    38: "Extended Display",
     40: "Radar",
     41: "Tracker",
     48: "Tire Pressure Monitor",

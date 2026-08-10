@@ -5,11 +5,13 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import timedelta
+import asyncio
 import hashlib
 import logging
 from pathlib import Path
 import threading
 import time
+import uuid
 from typing import Any
 
 from openant.devices import ANTPLUS_NETWORK_KEY
@@ -22,7 +24,13 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.storage import Store
 
-from .const import DOMAIN, REMOTE_ADAPTER_CAPTURE_EVENT
+from .const import (
+    DOMAIN,
+    REMOTE_ADAPTER_CAPTURE_EVENT,
+    REMOTE_ADAPTER_CONTROL_EVENT,
+    REMOTE_CONTROL_PROTOCOL,
+    REMOTE_CONTROL_TIMEOUT,
+)
 from .usb_selected import create_selected_node
 
 _LOGGER = logging.getLogger(__name__)
@@ -268,6 +276,8 @@ class LocalAdapterScanner:
         self._node = None
         self._lock = threading.RLock()
         self._enabled = False
+        self._scan_channel = None
+        self._control_lock = threading.RLock()
 
     @property
     def running(self) -> bool:
@@ -311,6 +321,46 @@ class LocalAdapterScanner:
             source=f"local:{self.adapter.stable_key}",
         )
 
+    def send_acknowledged(
+        self,
+        *,
+        device_id: int,
+        device_type: int,
+        transmission_type: int,
+        payload: bytes,
+        period: int,
+    ) -> None:
+        """Temporarily leave continuous scan mode and send one paired ACK."""
+        with self._control_lock:
+            node = self._node
+            scan = self._scan_channel
+            if not self.running or node is None or scan is None:
+                raise RuntimeError(f"ANT USB adapter {self.adapter.stable_key} is not capturing")
+            control = None
+            try:
+                # Continuous RX scan occupies the radio. Keep the node alive,
+                # briefly close scan mode, transmit, then immediately resume.
+                scan.close()
+                control = node.new_channel(
+                    Channel.Type.BIDIRECTIONAL_RECEIVE,
+                    ANTPLUS_NETWORK_NUMBER,
+                    0x01,
+                )
+                control.set_id(device_id, device_type, transmission_type)
+                control.set_period(period)
+                control.set_search_timeout(12)
+                control.set_rf_freq(ANTPLUS_RF_FREQUENCY)
+                control.open()
+                control.send_acknowledged_data(list(payload))
+            finally:
+                if control is not None:
+                    try:
+                        node.remove_channel(control)
+                    except Exception:
+                        _LOGGER.debug("Failed to remove ANT+ control channel", exc_info=True)
+                if self._enabled and self._node is node:
+                    scan.open_rx_scan_mode()
+
     def _run(self) -> None:
         try:
             if self.adapter.bus is None or self.adapter.address is None:
@@ -337,10 +387,12 @@ class LocalAdapterScanner:
             channel.on_broadcast_data = self._on_data
             channel.on_burst_data = self._on_data
             channel.on_acknowledge = self._on_data
+            channel.on_acknowledge_data = self._on_data
             channel.set_id(0, 0, 0)
             channel.enable_extended_messages(1)
             channel.set_rf_freq(ANTPLUS_RF_FREQUENCY)
             channel.open_rx_scan_mode()
+            self._scan_channel = channel
 
             _LOGGER.info(
                 "Capture started on local ANT USB adapter %s",
@@ -355,6 +407,7 @@ class LocalAdapterScanner:
             )
             self.state_callback(False, str(err))
         finally:
+            self._scan_channel = None
             self._node = None
             self.state_callback(False, None)
             _LOGGER.info(
@@ -373,6 +426,8 @@ class AntAdapterManager:
         self._records: dict[str, AdapterPresence] = {}
         self._callbacks: list[AdapterCallback] = []
         self._remote_gateway_last_seen: dict[str, float] = {}
+        self._remote_gateway_control_protocol: dict[str, int] = {}
+        self._remote_control_waiters: dict[str, asyncio.Future] = {}
         self._local_scanners: dict[str, LocalAdapterScanner] = {}
         self._unsubs: list[Callable[[], None]] = []
         self._capture_store = Store[dict[str, Any]](
@@ -791,6 +846,131 @@ class AntAdapterManager:
                 requested,
             )
 
+    def _device_sources(self, device_id: int) -> list[str]:
+        device = self.receiver.devices.get(device_id)
+        if device is None:
+            return []
+        return sorted(device.decoder_state.get("sources", set()))
+
+    def can_control_device(self, device_id: int) -> bool:
+        for source in self._device_sources(device_id):
+            if source.startswith("local:"):
+                key = source.split(":", 1)[1]
+                scanner = self._local_scanners.get(key)
+                if scanner is not None and scanner.running:
+                    return True
+            elif source.startswith("remote:"):
+                parts = source.split(":", 2)
+                if len(parts) == 3:
+                    gateway_id, adapter_id = parts[1], parts[2]
+                    record = self._records.get(adapter_id)
+                    if (
+                        record
+                        and gateway_id in (record.remote_gateways or {})
+                        and record.remote_capture_states.get(gateway_id, False)
+                        and self._remote_gateway_control_protocol.get(gateway_id, 0) >= REMOTE_CONTROL_PROTOCOL
+                    ):
+                        return True
+        return False
+
+    async def async_send_control(
+        self,
+        *,
+        device_id: int,
+        device_type: int,
+        payload: bytes,
+        period: int,
+        transmission_type: int | None = None,
+    ) -> None:
+        device = self.receiver.devices.get(device_id)
+        if device is None:
+            raise RuntimeError(f"ANT+ device {device_id} is not known")
+        if len(payload) != 8:
+            raise ValueError("ANT+ control payload must be exactly 8 bytes")
+        profile_tx = device.decoder_state.get("profile_transmission_types", {}).get(device_type, set())
+        if transmission_type is None:
+            transmission_type = min(profile_tx) if profile_tx else (min(device.transmission_types) if device.transmission_types else 0)
+        transmission_type = int(transmission_type) & 0xFF
+
+        # Prefer a local adapter that has actually heard this ANT device.
+        for source in self._device_sources(device_id):
+            if not source.startswith("local:"):
+                continue
+            key = source.split(":", 1)[1]
+            scanner = self._local_scanners.get(key)
+            if scanner is None or not scanner.running:
+                continue
+            await self.hass.async_add_executor_job(
+                lambda scanner=scanner: scanner.send_acknowledged(
+                    device_id=device_id,
+                    device_type=device_type,
+                    transmission_type=transmission_type,
+                    payload=payload,
+                    period=period,
+                )
+            )
+            return
+
+        # Otherwise route to a gateway/adapter that saw the device.
+        for source in self._device_sources(device_id):
+            if not source.startswith("remote:"):
+                continue
+            parts = source.split(":", 2)
+            if len(parts) != 3:
+                continue
+            gateway_id, adapter_id = parts[1], parts[2]
+            record = self._records.get(adapter_id)
+            if not record or gateway_id not in (record.remote_gateways or {}):
+                continue
+            if not record.remote_capture_states.get(gateway_id, False):
+                continue
+            if self._remote_gateway_control_protocol.get(gateway_id, 0) < REMOTE_CONTROL_PROTOCOL:
+                continue
+
+            command_id = uuid.uuid4().hex
+            future = self.hass.loop.create_future()
+            self._remote_control_waiters[command_id] = future
+            self.hass.bus.async_fire(
+                REMOTE_ADAPTER_CONTROL_EVENT,
+                {
+                    "gateway_id": gateway_id,
+                    "adapter_id": adapter_id,
+                    "command_id": command_id,
+                    "device_id": device_id,
+                    "device_type": device_type,
+                    "transmission_type": transmission_type,
+                    "period": period,
+                    "payload": payload.hex(),
+                },
+            )
+            try:
+                result = await asyncio.wait_for(future, timeout=REMOTE_CONTROL_TIMEOUT)
+            except asyncio.TimeoutError as err:
+                raise RuntimeError(
+                    f"Remote ANT+ gateway {gateway_id} did not confirm control command"
+                ) from err
+            finally:
+                self._remote_control_waiters.pop(command_id, None)
+
+            if not bool(result.get("success", False)):
+                detail = str(result.get("error") or "remote gateway rejected command")
+                raise RuntimeError(detail)
+            return
+
+        raise RuntimeError(
+            f"No active ANT adapter that has seen device {device_id} is available for control"
+        )
+
+    def resolve_remote_control_result(self, data: dict[str, Any]) -> None:
+        """Resolve one correlated remote-gateway control command."""
+        command_id = str(data.get("command_id", "")).strip()
+        if not command_id:
+            return
+        future = self._remote_control_waiters.get(command_id)
+        if future is None or future.done():
+            return
+        future.set_result(dict(data))
+
     async def async_refresh_local(self) -> None:
         adapters = await self.hass.async_add_executor_job(
             scan_linux_ant_adapters
@@ -831,9 +1011,11 @@ class AntAdapterManager:
         adapters: list[AntUsbAdapter],
         *,
         reconcile_capture: bool = False,
+        control_protocol: int = 0,
     ) -> None:
         now = time.monotonic()
         self._remote_gateway_last_seen[gateway_id] = now
+        self._remote_gateway_control_protocol[gateway_id] = max(0, int(control_protocol))
         current_keys = {adapter.stable_key for adapter in adapters}
 
         for stable_key, record in self._records.items():
@@ -873,6 +1055,7 @@ class AntAdapterManager:
 
         for gateway_id in expired_gateways:
             self._remote_gateway_last_seen.pop(gateway_id, None)
+            self._remote_gateway_control_protocol.pop(gateway_id, None)
 
         for stable_key, record in self._records.items():
             changed = False

@@ -238,9 +238,22 @@ class AntUsbAdapterDecoderCoverageSensor(AntUsbAdapterDiagnosticSensor):
 
     @property
     def extra_state_attributes(self):
+        from .decoder_adapters import decoder_backend_rows
+        from .documented_profiles import (
+            DOCUMENTED_FAMILIES_WITHOUT_CONFIRMED_DEVICE_TYPE,
+            documented_profile_types,
+        )
         return {
+            "decoder_backends": decoder_backend_rows(),
+            "documented_profiles": sorted(documented_profile_types()),
             "native_profiles": sorted(native_profile_types()),
-            "openant_fallback_profiles": sorted(supported_profile_types() - native_profile_types()),
+            "openant_profiles": sorted(supported_profile_types()),
+            "openant_fallback_profiles": sorted(
+                supported_profile_types() - native_profile_types()
+            ),
             "profile_matrix": profile_support_rows(),
+            "documented_families_without_confirmed_device_type": list(
+                DOCUMENTED_FAMILIES_WITHOUT_CONFIRMED_DEVICE_TYPE
+            ),
             "raw_fallback_for_all_profiles": True,
         }

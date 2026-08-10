@@ -36,6 +36,9 @@ HELLO_EVENT = "antplus_gateway_hello"
 STATUS_EVENT = "antplus_gateway_status"
 CAPTURE_EVENT = "antplus_adapter_capture"
 CAPTURE_STATE_EVENT = "antplus_adapter_capture_state"
+CONTROL_EVENT = "antplus_adapter_control"
+CONTROL_RESULT_EVENT = "antplus_adapter_control_result"
+CONTROL_PROTOCOL = 1
 
 SUPPORTED_USB_IDS = {
     ("0FCF", "1008"),
@@ -271,6 +274,8 @@ class AntScanner:
         self._thread: threading.Thread | None = None
         self._enabled = False
         self._lock = threading.RLock()
+        self._scan_channel = None
+        self._control_lock = threading.RLock()
 
     @property
     def enabled(self) -> bool:
@@ -355,6 +360,25 @@ class AntScanner:
         except queue.Full:
             _LOGGER.warning("Packet queue full; dropping ANT packet")
 
+    def send_acknowledged(self, *, device_id: int, device_type: int, transmission_type: int, payload: bytes, period: int) -> None:
+        with self._control_lock:
+            node=self._node; scan=self._scan_channel
+            if not self.running or node is None or scan is None:
+                raise RuntimeError(f"ANT adapter {self.adapter_id} is not capturing")
+            control=None
+            try:
+                scan.close()
+                control=node.new_channel(Channel.Type.BIDIRECTIONAL_RECEIVE, ANTPLUS_NETWORK_NUMBER, 0x01)
+                control.set_id(device_id,device_type,transmission_type)
+                control.set_period(period); control.set_search_timeout(12); control.set_rf_freq(ANTPLUS_RF_FREQUENCY); control.open()
+                control.send_acknowledged_data(list(payload))
+            finally:
+                if control is not None:
+                    try: node.remove_channel(control)
+                    except Exception: _LOGGER.debug("Failed to remove control channel",exc_info=True)
+                if self._enabled and self._node is node:
+                    scan.open_rx_scan_mode()
+
     def _run(self) -> None:
         last_error: Exception | None = None
 
@@ -404,10 +428,12 @@ class AntScanner:
                     channel.on_broadcast_data = self._on_data
                     channel.on_burst_data = self._on_data
                     channel.on_acknowledge = self._on_data
+                    channel.on_acknowledge_data = self._on_data
                     channel.set_id(0, 0, 0)
                     channel.enable_extended_messages(1)
                     channel.set_rf_freq(ANTPLUS_RF_FREQUENCY)
                     channel.open_rx_scan_mode()
+                    self._scan_channel = channel
 
                     if not self._enabled:
                         try:
@@ -469,6 +495,7 @@ class AntScanner:
             )
 
         finally:
+            self._scan_channel = None
             self._node = None
 
             if not self._enabled:
@@ -593,6 +620,7 @@ class HAConnection:
                 "event_type": STATUS_EVENT,
                 "event_data": {
                     "gateway_id": self.settings.gateway_id,
+                    "control_protocol": CONTROL_PROTOCOL,
                     "adapters": list(current.values()),
                 },
             },
@@ -671,6 +699,11 @@ class HAConnection:
                 },
             )
 
+            await self.send(
+                websocket,
+                {"type": "subscribe_events", "event_type": CONTROL_EVENT},
+            )
+
             await self.refresh_adapters(websocket, force=True)
 
             await self.send(
@@ -680,6 +713,7 @@ class HAConnection:
                     "event_type": HELLO_EVENT,
                     "event_data": {
                         "gateway_id": self.settings.gateway_id,
+                        "control_protocol": CONTROL_PROTOCOL,
                         "adapters": list(self._adapters.values()),
                     },
                 },
@@ -698,25 +732,59 @@ class HAConnection:
                         continue
 
                     event = message.get("event") or {}
-                    if event.get("event_type") != CAPTURE_EVENT:
-                        continue
-
+                    event_type = event.get("event_type")
                     data = event.get("data") or {}
                     if data.get("gateway_id") != self.settings.gateway_id:
                         continue
-
                     adapter_id = str(data.get("adapter_id", "")).strip()
                     if not adapter_id:
                         continue
 
-                    enabled = bool(data.get("enabled", False))
-                    self._desired[adapter_id] = enabled
-                    _LOGGER.info(
-                        "Capture %s -> %s",
-                        adapter_id,
-                        "ON" if enabled else "OFF",
-                    )
-                    self._sync_adapter(adapter_id)
+                    if event_type == CAPTURE_EVENT:
+                        enabled = bool(data.get("enabled", False))
+                        self._desired[adapter_id] = enabled
+                        _LOGGER.info("Capture %s -> %s", adapter_id, "ON" if enabled else "OFF")
+                        self._sync_adapter(adapter_id)
+                        continue
+
+                    if event_type == CONTROL_EVENT:
+                        command_id = str(data.get("command_id", "")).strip()
+                        result = {
+                            "gateway_id": self.settings.gateway_id,
+                            "adapter_id": adapter_id,
+                            "command_id": command_id,
+                            "success": False,
+                        }
+                        scanner = self._scanners.get(adapter_id)
+                        if scanner is None or not scanner.running:
+                            result["error"] = f"ANT adapter {adapter_id} is not active"
+                            _LOGGER.warning("Cannot send ANT+ control via inactive adapter %s", adapter_id)
+                        else:
+                            try:
+                                payload = bytes.fromhex(str(data["payload"]))
+                                if len(payload) != 8:
+                                    raise ValueError("payload must contain 8 bytes")
+                                await asyncio.to_thread(
+                                    scanner.send_acknowledged,
+                                    device_id=int(data["device_id"]),
+                                    device_type=int(data["device_type"]),
+                                    transmission_type=int(data.get("transmission_type", 0)),
+                                    payload=payload,
+                                    period=int(data["period"]),
+                                )
+                                result["success"] = True
+                            except Exception as err:
+                                result["error"] = str(err)
+                                _LOGGER.exception("ANT+ control command failed on %s: %s", adapter_id, err)
+
+                        await self.send(
+                            websocket,
+                            {
+                                "type": "fire_event",
+                                "event_type": CONTROL_RESULT_EVENT,
+                                "event_data": result,
+                            },
+                        )
             finally:
                 packet_task.cancel()
                 status_task.cancel()

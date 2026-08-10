@@ -9,8 +9,11 @@ from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .adapter import AntAdapterManager, AdapterPresence
-from .const import DOMAIN
-from .subentries import ensure_adapter_subentry
+from .const import DOMAIN, DEVICE_TYPE_DROPPER, DEVICE_TYPE_LEV
+from .subentries import ensure_adapter_subentry, ensure_sensor_subentry
+from .control import async_send, device_control_available, dropper_payload, lev_payload
+from .entity import AntPlusEntity
+from .models import AntDevice
 
 
 async def async_setup_entry(
@@ -42,6 +45,34 @@ async def async_setup_entry(
         hass.loop.call_soon_threadsafe(add, stable_key)
 
     entry.async_on_unload(manager.add_callback(changed))
+
+    sensors_subentry_id = ensure_sensor_subentry(hass, entry)
+    known_controls: set[tuple[int, str]] = set()
+
+    def add_device_controls(device: AntDevice) -> None:
+        entities = []
+        specs = []
+        if DEVICE_TYPE_DROPPER in device.profiles:
+            specs.append(("dropper_valve", AntDropperValveSwitch))
+        if DEVICE_TYPE_LEV in device.profiles:
+            specs.extend((
+                ("lev_lights", AntLevLightsSwitch),
+                ("lev_high_beam", AntLevHighBeamSwitch),
+                ("lev_turn_left", AntLevTurnLeftSwitch),
+                ("lev_turn_right", AntLevTurnRightSwitch),
+            ))
+        for key, cls in specs:
+            ident=(device.device_id,key)
+            if ident not in known_controls:
+                known_controls.add(ident); entities.append(cls(receiver, device))
+        if entities:
+            async_add_entities(entities, update_before_add=False, config_subentry_id=sensors_subentry_id)
+
+    for device in receiver.snapshot().values():
+        add_device_controls(device)
+    def ant_device_changed(device: AntDevice) -> None:
+        hass.loop.call_soon_threadsafe(add_device_controls, device)
+    entry.async_on_unload(receiver.add_device_callback(ant_device_changed))
 
 
 class AntUsbAdapterCaptureSwitch(SwitchEntity):
@@ -118,3 +149,52 @@ class AntUsbAdapterCaptureSwitch(SwitchEntity):
             self.hass.loop.call_soon_threadsafe(self.async_write_ha_state)
 
         self.async_on_remove(self.manager.add_callback(changed))
+
+
+class _AntControlSwitch(AntPlusEntity, SwitchEntity):
+    control_profile: int
+    state_key: str
+    def __init__(self, receiver, device, key, name, icon):
+        AntPlusEntity.__init__(self, receiver, device, "__control__")
+        self._attr_unique_id=f"{device.device_id}_{key}"
+        self._attr_name=name
+        self._attr_icon=icon
+    @property
+    def available(self):
+        return device_control_available(self.receiver,self.ant_device_id,self.control_profile)
+    @property
+    def is_on(self):
+        return bool(self.ant_device.decoder_state.get(self.state_key,{}).get(self.field,False))
+
+class AntDropperValveSwitch(_AntControlSwitch):
+    control_profile=DEVICE_TYPE_DROPPER; state_key="dropper_control"; field="unlocked"
+    def __init__(self,r,d): super().__init__(r,d,"dropper_valve","Valve Unlocked","mdi:seat")
+    async def _set(self,value):
+        state=self.ant_device.decoder_state.setdefault(self.state_key,{})
+        state["unlocked"]=value; state["sequence"]=(int(state.get("sequence",0))+1)&0xFF
+        payload=dropper_payload(unlocked=value,command_sequence=state["sequence"],unlock_delay_s=state.get("unlock_delay_s"))
+        await async_send(self.receiver,self.ant_device_id,self.control_profile,payload); self.async_write_ha_state()
+    async def async_turn_on(self,**kwargs): await self._set(True)
+    async def async_turn_off(self,**kwargs): await self._set(False)
+
+class _LevSwitch(_AntControlSwitch):
+    control_profile=DEVICE_TYPE_LEV; state_key="lev_control"
+    async def _set(self,value):
+        state=self.ant_device.decoder_state.setdefault(self.state_key,{})
+        state[self.field]=value
+        payload=lev_payload(assist_level=state.get("assist_level"),regenerative_level=state.get("regenerative_level"),rear_gear=state.get("rear_gear",0),front_gear=state.get("front_gear",0),lights=state.get("lights",False),high_beam=state.get("high_beam",False),turn_left=state.get("turn_left",False),turn_right=state.get("turn_right",False),wheel_circumference=state.get("wheel_circumference"),manufacturer_id=state.get("manufacturer_id",0xFFFF))
+        await async_send(self.receiver,self.ant_device_id,self.control_profile,payload); self.async_write_ha_state()
+    async def async_turn_on(self,**kwargs): await self._set(True)
+    async def async_turn_off(self,**kwargs): await self._set(False)
+class AntLevLightsSwitch(_LevSwitch):
+    field="lights"
+    def __init__(self,r,d): super().__init__(r,d,"lev_lights","Lights","mdi:lightbulb")
+class AntLevHighBeamSwitch(_LevSwitch):
+    field="high_beam"
+    def __init__(self,r,d): super().__init__(r,d,"lev_high_beam","High Beam","mdi:car-light-high")
+class AntLevTurnLeftSwitch(_LevSwitch):
+    field="turn_left"
+    def __init__(self,r,d): super().__init__(r,d,"lev_turn_left","Left Turn Signal","mdi:arrow-left-bold")
+class AntLevTurnRightSwitch(_LevSwitch):
+    field="turn_right"
+    def __init__(self,r,d): super().__init__(r,d,"lev_turn_right","Right Turn Signal","mdi:arrow-right-bold")

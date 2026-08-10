@@ -26,6 +26,7 @@ PROFILE_MODES = {
     31: ("spec_required", "Recognized losslessly; exact SmO2/THb page layout requires the profile specification."),
     34: ("native", "Native Shifting status and trim decoder."),
     35: ("spec_required", "Recognized losslessly; exact Bicycle Lights page layout is not guessed."),
+    38: ("spec_required", "Extended Display is recognized; passive aggregate traffic is retained while bidirectional display exchange remains separate."),
     40: ("spec_required", "Recognized losslessly; exact Radar target page layout is not guessed."),
     41: ("spec_required", "Recognized losslessly; exact Tracker asset page layout requires the profile specification."),
     48: ("openant_fallback", "OpenANT fallback currently available; native port pending."),
@@ -50,7 +51,25 @@ def native_profile_types() -> set[int]:
     return {k for k, v in PROFILE_SUPPORT.items() if v.mode == "native"}
 
 def profile_support_rows() -> list[dict[str, object]]:
-    return [
-        {"device_type": v.device_type, "name": v.name, "mode": v.mode, "detail": v.detail}
-        for v in sorted(PROFILE_SUPPORT.values(), key=lambda item: item.device_type)
-    ]
+    from .documented_profiles import DOCUMENTED_PROFILES
+    from .openant_bridge import supported_profile_types
+
+    openant_types = supported_profile_types()
+    rows: list[dict[str, object]] = []
+    for v in sorted(PROFILE_SUPPORT.values(), key=lambda item: item.device_type):
+        documented = DOCUMENTED_PROFILES.get(v.device_type)
+        rows.append(
+            {
+                "device_type": v.device_type,
+                "name": v.name,
+                "mode": v.mode,
+                "detail": v.detail,
+                "native_adapter": True,
+                "native_semantic": v.mode == "native",
+                "openant_adapter": v.device_type in openant_types,
+                "documented_capabilities": list(documented.capabilities) if documented else [],
+                "passive_role": documented.passive_role if documented else None,
+                "active_features": list(documented.active_features) if documented else [],
+            }
+        )
+    return rows

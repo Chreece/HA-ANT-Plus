@@ -159,181 +159,76 @@ class OpenAntParserAdapter:
 
 
 def _dataclass_to_metrics(page_name: str, data: Any) -> list[AntMetric]:
-    """Convert an OpenANT DeviceData dataclass to curated HA entities.
+    """Convert every useful OpenANT dataclass field into HA state.
 
-    Decoder plumbing and metadata fields are deliberately not surfaced as
-    normal entities. Raw page diagnostics remain available elsewhere, so no
-    received ANT information is lost.
+    Primary measurements stay normal entities. Protocol bookkeeping and
+    identification values remain available as diagnostic entities instead of
+    being silently suppressed. Complex values are normalized to stable text.
     """
     if not is_dataclass(data):
         return []
 
     now = datetime.now(timezone.utc)
     out: list[AntMetric] = []
-
-    values = {}
+    values: dict[str, Any] = {}
     for field in fields(data):
         try:
             values[field.name] = getattr(data, field.name)
         except Exception:
             continue
 
-    # Merge OpenANT battery structures into meaningful entities.
-    # Common OpenANT battery dataclasses expose voltage_coarse,
-    # voltage_fractional, status and sometimes battery_percentage.
-    if "voltage_coarse" in values or "voltage_fractional" in values:
+    is_battery_page = page_name == "battery"
+    if is_battery_page and ("voltage_coarse" in values or "voltage_fractional" in values):
         coarse = values.get("voltage_coarse")
         fractional = values.get("voltage_fractional")
         if isinstance(coarse, (int, float)) and coarse not in (-1, 15, 255):
-            frac = float(fractional or 0)
-            # OpenANT may already provide the fractional component as volts.
-            voltage = float(coarse) + frac
-
-            # Never expose a synthetic 0 V battery measurement. Wait until
-            # the device actually provides a meaningful battery voltage.
+            voltage = float(coarse) + float(fractional or 0)
             if voltage > 0:
-                out.append(
-                    AntMetric(
-                        key="battery_voltage",
-                        name="Battery Voltage",
-                        value=round(voltage, 3),
-                        unit="V",
-                        device_class="voltage",
-                        state_class="measurement",
-                        icon="mdi:battery",
-                        entity_category=EntityCategory.DIAGNOSTIC,
-                        enabled_default=True,
-                        updated_at=now,
-                        availability_mode="device",
-                    )
-                )
-
+                out.append(AntMetric(key="battery_voltage", name="Battery Voltage", value=round(voltage,3), unit="V", device_class="voltage", state_class="measurement", icon="mdi:battery", entity_category=EntityCategory.DIAGNOSTIC, enabled_default=True, updated_at=now, availability_mode="device"))
         percentage = values.get("battery_percentage")
-        if isinstance(percentage, (int, float)) and 0 <= percentage <= 100:
-            out.append(
-                AntMetric(
-                    key="battery_level",
-                    name="Battery",
-                    value=percentage,
-                    unit="%",
-                    device_class="battery",
-                    state_class="measurement",
-                    icon="mdi:battery",
-                    entity_category=EntityCategory.DIAGNOSTIC,
-                    enabled_default=True,
-                    updated_at=now,
-                    availability_mode="device",
-                )
-            )
+        if isinstance(percentage,(int,float)) and 0 <= percentage <= 100:
+            out.append(AntMetric(key="battery_level", name="Battery", value=percentage, unit="%", device_class="battery", state_class="measurement", icon="mdi:battery", entity_category=EntityCategory.DIAGNOSTIC, enabled_default=True, updated_at=now, availability_mode="device"))
 
-        status = values.get("status")
-        if isinstance(status, Enum):
-            status = status.name
-        if status not in (None, "", "Unknown", "Invalid"):
-            out.append(
-                AntMetric(
-                    key="battery_status",
-                    name="Battery Status",
-                    value=str(status),
-                    icon="mdi:battery-heart-variant",
-                    entity_category=EntityCategory.DIAGNOSTIC,
-                    enabled_default=True,
-                    updated_at=now,
-                    availability_mode="device",
-                )
-            )
-
-    # Fields that belong in device info, raw diagnostics or parser internals.
-    suppressed = {
-        "page_specific",
-        "manufacturer_id_lsb",
-        "manufacturer_id",
-        "serial_number",
-        "serial_no",
-        "hardware_rev",
-        "hardware_revision",
-        "software_rev",
-        "software_revision",
-        "model_no",
-        "model_number",
-        "voltage_coarse",
-        "voltage_fractional",
-        "battery_percentage",
-        "status",
-    }
-
-    # Fields useful to advanced users but not primary device sensors.
     diagnostic_fields = {
-        "beat_count",
-        "beat_time",
-        "previous_heart_beat_time",
-        "operating_time",
-        "event_count",
-        "accumulated_power",
-        "accumulated_torque",
-        "crank_ticks",
-        "wheel_ticks",
+        "page_specific", "manufacturer_id_lsb", "manufacturer_id", "serial_number",
+        "serial_no", "hardware_rev", "hardware_revision", "software_rev",
+        "software_revision", "model_no", "model_number", "voltage_coarse",
+        "voltage_fractional", "battery_percentage", "beat_count", "beat_time",
+        "previous_heart_beat_time", "operating_time", "event_count",
+        "accumulated_power", "accumulated_torque", "crank_ticks", "wheel_ticks",
+        "command_sequence", "slave_serial", "slave_manufacturer_id",
+        "last_received_command_page", "response_data", "capabilities",
     }
 
     for field in fields(data):
         name = field.name
-        if name in suppressed:
-            continue
-
         try:
             value = getattr(data, name)
         except Exception:
             continue
-
-        if is_dataclass(value):
-            # Keep nested parser structures out of the main entity model.
-            continue
-
-        if isinstance(value, Enum):
-            value = value.name
-
         if value is None:
             continue
-
-        # ANT+ unavailable/sentinel values.
-        if isinstance(value, int) and value in {
-            -1,
-            0xFF,
-            0xFFFF,
-            0xFFFFFF,
-            0xFFFFFFFF,
-        }:
+        if isinstance(value, Enum):
+            value = value.name
+        elif isinstance(value, set):
+            value = ", ".join(sorted(getattr(v, "name", str(v)) for v in value))
+        elif isinstance(value, (list, tuple)):
+            value = ", ".join(getattr(v, "name", str(v)) for v in value)
+        elif isinstance(value, dict):
+            value = ", ".join(f"{k}={v}" for k,v in sorted(value.items(), key=lambda item: str(item[0])))
+        elif is_dataclass(value):
             continue
-
-        # Empty/NaN floats are not useful entities.
-        if isinstance(value, float):
-            if value != value:
-                continue
+        if isinstance(value, int) and value in {-1,0xFF,0xFFFF,0xFFFFFF,0xFFFFFFFF}:
+            continue
+        if isinstance(value,float) and value != value:
+            continue
 
         unit = field.metadata.get("unit") if field.metadata else None
         key = _normalise_key(name)
-        friendly = name.replace("_", " ").title()
-        device_class, state_class, icon = _ha_semantics(key, unit)
-
-        is_diagnostic = name in diagnostic_fields
-        slow = "battery" in key
-
-        out.append(
-            AntMetric(
-                key=key,
-                name=friendly,
-                value=value,
-                unit=unit,
-                device_class=device_class,
-                state_class=state_class,
-                icon=icon,
-                entity_category=EntityCategory.DIAGNOSTIC if (is_diagnostic or slow) else None,
-                enabled_default=not is_diagnostic,
-                updated_at=now,
-                availability_mode="device" if slow else "metric",
-            )
-        )
-
+        friendly = name.replace("_"," ").title()
+        device_class,state_class,icon = _ha_semantics(key,unit)
+        diagnostic = name in diagnostic_fields or is_battery_page
+        out.append(AntMetric(key=key,name=friendly,value=value,unit=unit,device_class=device_class,state_class=state_class,icon=icon,entity_category=EntityCategory.DIAGNOSTIC if diagnostic else None,enabled_default=not diagnostic or name in {"status"},updated_at=now,availability_mode="device" if diagnostic else "metric"))
     return out
 
 def _normalise_key(name: str) -> str:

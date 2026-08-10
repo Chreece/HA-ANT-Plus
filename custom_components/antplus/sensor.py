@@ -195,22 +195,24 @@ class AntPlusDecoderCoverageSensor(SensorEntity):
 
     @property
     def native_value(self):
+        from .profile_support import native_profile_types
         from .openant_bridge import supported_profile_types
-        # +1 for our custom Stride Speed/Distance parser.
-        return len(supported_profile_types() | {124})
+        return len(native_profile_types() | supported_profile_types())
 
     @property
     def extra_state_attributes(self):
-        from .const import DEVICE_TYPE_NAMES
-        from .openant_bridge import supported_profile_types
-        types = sorted(supported_profile_types() | {124})
+        from .decoder_adapters import decoder_backend_rows
+        from .documented_profiles import (
+            DOCUMENTED_FAMILIES_WITHOUT_CONFIRMED_DEVICE_TYPE,
+            documented_profile_rows,
+        )
+        from .profile_support import profile_support_rows
         return {
-            "decoded_profiles": [
-                {
-                    "device_type": profile,
-                    "name": DEVICE_TYPE_NAMES.get(profile, f"Profile {profile}"),
-                }
-                for profile in types
-            ],
+            "decoder_backends": decoder_backend_rows(),
+            "profile_matrix": profile_support_rows(),
+            "documented_profiles": documented_profile_rows(),
+            "documented_families_without_confirmed_device_type": list(
+                DOCUMENTED_FAMILIES_WITHOUT_CONFIRMED_DEVICE_TYPE
+            ),
             "raw_fallback_for_all_profiles": True,
         }

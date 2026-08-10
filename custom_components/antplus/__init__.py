@@ -13,6 +13,8 @@ from .adapter import AntAdapterManager
 from .const import DOMAIN, PLATFORMS
 from .receiver import AntPlusReceiver
 from .remote import async_register_remote_listener
+from .events import async_register_event_dispatcher
+from .services import async_register_services, async_unregister_services
 from .subentries import migrate_devices_to_subentries
 
 
@@ -26,11 +28,14 @@ async def async_setup_entry(
     receiver.adapter_manager = adapter_manager
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = receiver
+    async_register_services(hass, receiver)
 
     await async_cleanup_legacy_entities(hass, entry)
     await adapter_manager.async_start()
     entry.async_on_unload(adapter_manager.stop)
     migrate_devices_to_subentries(hass, entry, adapter_manager)
+
+    entry.async_on_unload(async_register_event_dispatcher(hass, entry, receiver))
 
     entry.async_on_unload(
         async_register_remote_listener(
@@ -76,6 +81,7 @@ async def async_unload_entry(
     receiver.adapter_manager.stop()
 
     if not hass.data[DOMAIN]:
+        async_unregister_services(hass)
         hass.data.pop(DOMAIN)
 
     return True
@@ -91,19 +97,8 @@ async def async_cleanup_legacy_entities(
 
     unwanted_suffixes = {
         "_page_specific",
-        "_manufacturer_id_lsb",
-        "_manufacturer_id",
-        "_serial_number",
-        "_serial_no",
-        "_hardware_rev",
-        "_hardware_revision",
-        "_software_rev",
-        "_software_revision",
-        "_model_no",
-        "_model_number",
         "_voltage_coarse",
         "_voltage_fractional",
-        "_operating_time",
         "_capture_toggle",
     }
 
