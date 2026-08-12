@@ -7,6 +7,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DEVICE_TYPE_TIRE_PRESSURE, DOMAIN
+from .capabilities import CONTROL_TPMS_CONFIGURATION, supports_control
 from .control import async_send, device_control_available, tpms_parameter_payload
 from .entity import AntPlusEntity
 from .models import AntDevice
@@ -20,7 +21,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     known: set[int] = set()
 
     def add_for_device(device: AntDevice) -> None:
-        if DEVICE_TYPE_TIRE_PRESSURE not in device.profiles or device.device_id in known:
+        if not supports_control(device, CONTROL_TPMS_CONFIGURATION) or device.device_id in known:
             return
         known.add(device.device_id)
         async_add_entities([AntTpmsPosition(receiver, device)], update_before_add=False, config_subentry_id=subentry_id)
@@ -37,7 +38,11 @@ class AntTpmsPosition(AntPlusEntity, SelectEntity):
         self._attr_unique_id = f"{device.device_id}_tpms_position"
         self._attr_name = "Sensor Position"
     @property
-    def available(self): return device_control_available(self.receiver, self.ant_device_id, DEVICE_TYPE_TIRE_PRESSURE)
+    def available(self):
+        return (
+            device_control_available(self.receiver, self.ant_device_id, DEVICE_TYPE_TIRE_PRESSURE)
+            and supports_control(self.ant_device, CONTROL_TPMS_CONFIGURATION)
+        )
     @property
     def current_option(self):
         value = int(self.ant_device.decoder_state.get("tpms_control", {}).get("position", 0))

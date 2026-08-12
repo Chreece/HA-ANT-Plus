@@ -18,6 +18,14 @@ from .const import (
     DEVICE_TYPE_POWER,
     DOMAIN,
 )
+from .capabilities import (
+    CONTROL_FE_REQUEST_CAPABILITIES,
+    CONTROL_FE_SPINDOWN_CALIBRATION,
+    CONTROL_FE_ZERO_OFFSET_CALIBRATION,
+    CONTROL_GENERIC,
+    CONTROL_POWER_CALIBRATION,
+    supports_control,
+)
 from .subentries import ensure_sensor_subentry
 from .receiver import AntPlusReceiver
 from .control import (
@@ -118,24 +126,10 @@ async def async_setup_entry(
     )
 
     known_controls: set[tuple[int, str]] = set()
+    pending_power_capability_checks: set[int] = set()
 
-    def add_device_controls(device: AntDevice) -> None:
+    def add_specs(device: AntDevice, specs: list[tuple[str, type[ButtonEntity], tuple]]) -> None:
         entities: list[ButtonEntity] = []
-        specs: list[tuple[str, type[ButtonEntity], tuple]] = []
-        if DEVICE_TYPE_CONTROLS in device.profiles:
-            for command in GENERIC_CONTROL_COMMANDS:
-                specs.append((f"controls_{command}", AntGenericControlButton, (command,)))
-        if DEVICE_TYPE_FITNESS_EQUIPMENT in device.profiles:
-            specs.extend((
-                ("fe_calibrate_zero_offset", AntFeCalibrationButton, ("zero_offset",)),
-                ("fe_calibrate_spin_down", AntFeCalibrationButton, ("spin_down",)),
-                ("fe_calibrate_both", AntFeCalibrationButton, ("both",)),
-                ("fe_cancel_calibration", AntFeCalibrationButton, ("cancel",)),
-                ("fe_request_capabilities", AntFeRequestCapabilitiesButton, ()),
-            ))
-        if DEVICE_TYPE_POWER in device.profiles:
-            specs.append(("power_manual_calibration", AntPowerCalibrationButton, ()))
-
         for key, cls, args in specs:
             ident = (device.device_id, key)
             if ident in known_controls:
@@ -148,6 +142,97 @@ async def async_setup_entry(
                 update_before_add=False,
                 config_subentry_id=sensors_subentry_id,
             )
+
+    def finalize_power_controls(device_id: int) -> None:
+        pending_power_capability_checks.discard(device_id)
+        device = receiver.devices.get(device_id)
+        if device is None or not supports_control(device, CONTROL_POWER_CALIBRATION):
+            return
+        add_specs(device, [("power_manual_calibration", AntPowerCalibrationButton, ())])
+
+    def schedule_power_capability_check(device: AntDevice) -> None:
+        # A multi-profile device may announce Device Type 11 before its running
+        # companion profiles. Wait briefly for discovery to settle so a running
+        # power source cannot momentarily create a Bicycle Power calibration
+        # button that would then remain in the HA entity registry.
+        if device.device_id in pending_power_capability_checks:
+            return
+        if (device.device_id, "power_manual_calibration") in known_controls:
+            return
+        pending_power_capability_checks.add(device.device_id)
+        hass.loop.call_later(5.0, finalize_power_controls, device.device_id)
+
+    def probe_fe_capabilities(device: AntDevice) -> None:
+        if DEVICE_TYPE_FITNESS_EQUIPMENT not in device.profiles:
+            return
+        state = device.decoder_state
+        if not isinstance(state.get("fe_capabilities"), dict) and not state.get("_fe_capabilities_probe_pending"):
+            state["_fe_capabilities_probe_pending"] = True
+
+            async def request_capabilities() -> None:
+                try:
+                    await async_send(
+                        receiver,
+                        device.device_id,
+                        DEVICE_TYPE_FITNESS_EQUIPMENT,
+                        request_data_page_payload(0x36),
+                    )
+                except Exception:
+                    # Adapter/device may not yet be ready; allow a later device
+                    # callback to retry rather than permanently assuming support.
+                    state["_fe_capabilities_probe_pending"] = False
+                    _LOGGER.debug("Unable to probe FE-C capabilities for %s yet", device.device_id, exc_info=True)
+
+            hass.async_create_task(request_capabilities())
+
+        # User Configuration is optional. Once simulation is positively
+        # advertised, request page 55 to establish support before exposing its
+        # writable entities.
+        fe_caps = state.get("fe_capabilities")
+        pages = state.get("observed_pages", {}).get(DEVICE_TYPE_FITNESS_EQUIPMENT, set())
+        if (
+            isinstance(fe_caps, dict)
+            and fe_caps.get("simulation") is True
+            and 0x37 not in pages
+            and not state.get("_fe_user_configuration_probe_pending")
+        ):
+            state["_fe_user_configuration_probe_pending"] = True
+
+            async def request_user_configuration() -> None:
+                try:
+                    await async_send(
+                        receiver,
+                        device.device_id,
+                        DEVICE_TYPE_FITNESS_EQUIPMENT,
+                        request_data_page_payload(0x37),
+                    )
+                except Exception:
+                    state["_fe_user_configuration_probe_pending"] = False
+                    _LOGGER.debug("Unable to probe FE-C user configuration for %s yet", device.device_id, exc_info=True)
+
+            hass.async_create_task(request_user_configuration())
+
+    def add_device_controls(device: AntDevice) -> None:
+        probe_fe_capabilities(device)
+        specs: list[tuple[str, type[ButtonEntity], tuple]] = []
+        if supports_control(device, CONTROL_GENERIC):
+            for command in GENERIC_CONTROL_COMMANDS:
+                specs.append((f"controls_{command}", AntGenericControlButton, (command,)))
+        if supports_control(device, CONTROL_FE_REQUEST_CAPABILITIES):
+            specs.append(("fe_request_capabilities", AntFeRequestCapabilitiesButton, ()))
+        zero = supports_control(device, CONTROL_FE_ZERO_OFFSET_CALIBRATION)
+        spin = supports_control(device, CONTROL_FE_SPINDOWN_CALIBRATION)
+        if zero:
+            specs.append(("fe_calibrate_zero_offset", AntFeCalibrationButton, ("zero_offset",)))
+        if spin:
+            specs.append(("fe_calibrate_spin_down", AntFeCalibrationButton, ("spin_down",)))
+        if zero and spin:
+            specs.append(("fe_calibrate_both", AntFeCalibrationButton, ("both",)))
+        if zero or spin:
+            specs.append(("fe_cancel_calibration", AntFeCalibrationButton, ("cancel",)))
+        add_specs(device, specs)
+        if DEVICE_TYPE_POWER in device.profiles:
+            schedule_power_capability_check(device)
 
     for device in receiver.snapshot().values():
         add_device_controls(device)
@@ -205,6 +290,7 @@ class AntPlusCleanupStaleDevicesButton(ButtonEntity):
 
 class _AntDeviceControlButton(AntPlusEntity, ButtonEntity):
     control_profile: int
+    capability: str
 
     def __init__(self, receiver, device, key: str, name: str, icon: str) -> None:
         AntPlusEntity.__init__(self, receiver, device, "__control__")
@@ -214,13 +300,15 @@ class _AntDeviceControlButton(AntPlusEntity, ButtonEntity):
 
     @property
     def available(self) -> bool:
-        return device_control_available(
-            self.receiver, self.ant_device_id, self.control_profile
+        return (
+            device_control_available(self.receiver, self.ant_device_id, self.control_profile)
+            and supports_control(self.ant_device, self.capability)
         )
 
 
 class AntGenericControlButton(_AntDeviceControlButton):
     control_profile = DEVICE_TYPE_CONTROLS
+    capability = CONTROL_GENERIC
 
     _NAMES = {
         "menu_up": ("Menu Up", "mdi:menu-up"),
@@ -264,8 +352,30 @@ class AntFeCalibrationButton(_AntDeviceControlButton):
 
     def __init__(self, receiver, device, mode: str) -> None:
         self.mode = mode
-        name, icon, _zero, _spin = self._MODES[mode]
+        name, icon, zero, spin = self._MODES[mode]
+        if spin and not zero:
+            self.capability = CONTROL_FE_SPINDOWN_CALIBRATION
+        else:
+            self.capability = CONTROL_FE_ZERO_OFFSET_CALIBRATION
         super().__init__(receiver, device, f"fe_calibrate_{mode}", name, icon)
+
+    @property
+    def available(self) -> bool:
+        if self.mode == "both":
+            return (
+                device_control_available(self.receiver, self.ant_device_id, self.control_profile)
+                and supports_control(self.ant_device, CONTROL_FE_ZERO_OFFSET_CALIBRATION)
+                and supports_control(self.ant_device, CONTROL_FE_SPINDOWN_CALIBRATION)
+            )
+        if self.mode == "cancel":
+            return (
+                device_control_available(self.receiver, self.ant_device_id, self.control_profile)
+                and (
+                    supports_control(self.ant_device, CONTROL_FE_ZERO_OFFSET_CALIBRATION)
+                    or supports_control(self.ant_device, CONTROL_FE_SPINDOWN_CALIBRATION)
+                )
+            )
+        return super().available
 
     async def async_press(self) -> None:
         _name, _icon, zero, spin = self._MODES[self.mode]
@@ -279,6 +389,7 @@ class AntFeCalibrationButton(_AntDeviceControlButton):
 
 class AntFeRequestCapabilitiesButton(_AntDeviceControlButton):
     control_profile = DEVICE_TYPE_FITNESS_EQUIPMENT
+    capability = CONTROL_FE_REQUEST_CAPABILITIES
 
     def __init__(self, receiver, device) -> None:
         super().__init__(
@@ -303,6 +414,7 @@ class AntFeRequestCapabilitiesButton(_AntDeviceControlButton):
 
 class AntPowerCalibrationButton(_AntDeviceControlButton):
     control_profile = DEVICE_TYPE_POWER
+    capability = CONTROL_POWER_CALIBRATION
 
     def __init__(self, receiver, device) -> None:
         super().__init__(

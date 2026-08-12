@@ -1,4 +1,17 @@
+## 2026.8.11
+
+- Added one central, vendor-neutral ANT+ capability model for all implemented controls and semantic events.
+- Home Assistant control entities are now created from resolved capabilities rather than device-type checks scattered across platforms.
+- FE-C Basic Resistance, Target Power and Simulation controls now require positive capability-page evidence before entity creation.
+- FE-C User Configuration controls require positive page-55 evidence; HA automatically requests capabilities and optional user configuration when appropriate.
+- FE-C command-status feedback can confirm or revoke optional controls dynamically when equipment reports pass, not-supported or rejected.
+- Bicycle Power calibration is role-aware globally, preventing running-power devices that reuse Device Type 11 from inheriting cycling calibration controls.
+- Semantic ANT+ events now use the same capability model, including Generic Control, FE-C, Bicycle Power, Shifting and Dropper events.
+- Semantic service actions validate resolved capabilities, while advanced raw-control/page-request services remain available for diagnostics and unsupported future profiles.
+- Local USB and remote-gateway control routing remain identical; no gateway protocol update is required.
+
 ## 2026.8.10
+
 
 - Expand Controls Device support with dedicated Home Assistant buttons for Generic Control menu navigation and timer Start, Stop, Reset, Lap and Length commands, plus `antplus.send_generic_control`.
 - Add full FE-C trainer-mode controls for simulation grade, rolling resistance, wind resistance, wind speed and drafting factor in addition to the existing Target Power and Basic Resistance controls.
@@ -6,6 +19,7 @@
 - Add FE-C zero-offset/spin-down calibration buttons, calibration progress/result metrics and `antplus_event` calibration events.
 - Add an FE-C Request Capabilities button and use received capability information to disable unsupported Basic Resistance, Target Power or Simulation controls.
 - Add Bicycle Power manual-calibration control and calibration-response events.
+- Make Bicycle Power calibration role-aware: multi-profile running-power sources no longer create a cycling Manual Calibration control, while genuine Bicycle Power/cycling devices retain it; button creation waits briefly for companion-profile discovery and availability is rechecked dynamically.
 - Route every new semantic command through the existing confirmed adapter-control transport, preserving identical behavior for local ANT USB adapters and remote gateways.
 - Keep Generic Control timer Stop distinct from Audio/Video Pause: Pause belongs to the ANT+ Audio/Video control use cases and is not fabricated as a Generic Control command.
 

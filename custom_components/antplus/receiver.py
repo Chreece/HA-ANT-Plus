@@ -17,10 +17,12 @@ from openant.easy.node import Node
 from .const import (
     ANTPLUS_NETWORK_NUMBER,
     ANTPLUS_RF_FREQUENCY,
+    DEVICE_TYPE_FITNESS_EQUIPMENT,
     DEVICE_TYPE_NAMES,
     MANUFACTURERS,
 )
 from .decoder import decode_packet
+from .capabilities import capability_signature, record_fe_command_status, record_observed_page
 from .diagnostics import AntPlusDiagnostics
 from .models import AntDevice
 
@@ -536,6 +538,12 @@ class AntPlusReceiver:
 
             metadata_changed = before_metadata != after_metadata
 
+            # Central capability model tracks positive page evidence before
+            # entities/events are exposed. Capability changes are surfaced to
+            # the same device callbacks used for profile discovery.
+            before_capabilities = capability_signature(device)
+            record_observed_page(device, device_type, payload)
+
             changed_metrics: list[str] = []
 
             decode_started = time.perf_counter()
@@ -546,6 +554,13 @@ class AntPlusReceiver:
             self.diagnostics.inc("metrics_produced", len(decoded_metrics))
             self.diagnostics.add_time("decode_total", decode_elapsed)
             self.diagnostics.set_gauge("last_decode_device_type", device_type)
+
+            # FE-C command status is authoritative capability feedback. A PASS
+            # can confirm an optional control; NOT_SUPPORTED/REJECTED revokes it.
+            if device_type == DEVICE_TYPE_FITNESS_EQUIPMENT and (payload[0] & 0x7F) == 0x47:
+                record_fe_command_status(device, payload[1], payload[3])
+
+            capability_changed = capability_signature(device) != before_capabilities
 
             for metric in decoded_metrics:
                 old = device.metrics.get(metric.key)
@@ -594,7 +609,7 @@ class AntPlusReceiver:
                 source,
             )
 
-        if new_device or new_profile or metadata_changed:
+        if new_device or new_profile or metadata_changed or capability_changed:
             for callback in tuple(self._device_callbacks):
                 try:
                     callback(device)

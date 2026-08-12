@@ -7,6 +7,16 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DEVICE_TYPE_FITNESS_EQUIPMENT, DEVICE_TYPE_LEV, DEVICE_TYPE_DROPPER, DEVICE_TYPE_TIRE_PRESSURE, DOMAIN
+from .capabilities import (
+    CONTROL_DROPPER,
+    CONTROL_FE_BASIC_RESISTANCE,
+    CONTROL_FE_SIMULATION,
+    CONTROL_FE_TARGET_POWER,
+    CONTROL_FE_USER_CONFIGURATION,
+    CONTROL_LEV,
+    CONTROL_TPMS_CONFIGURATION,
+    supports_control,
+)
 from .control import (
     async_send,
     device_control_available,
@@ -32,21 +42,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     def add_for_device(device: AntDevice) -> None:
         entities = []
         specs = []
-        if DEVICE_TYPE_FITNESS_EQUIPMENT in device.profiles:
+        if supports_control(device, CONTROL_FE_TARGET_POWER):
+            specs.append(("fe_target_power", AntFeTargetPower))
+        if supports_control(device, CONTROL_FE_BASIC_RESISTANCE):
+            specs.append(("fe_basic_resistance", AntFeBasicResistance))
+        if supports_control(device, CONTROL_FE_SIMULATION):
             specs.extend((
-                ("fe_target_power", AntFeTargetPower),
-                ("fe_basic_resistance", AntFeBasicResistance),
                 ("fe_grade", AntFeGrade),
                 ("fe_rolling_resistance", AntFeRollingResistance),
                 ("fe_wind_resistance", AntFeWindResistance),
                 ("fe_wind_speed", AntFeWindSpeed),
                 ("fe_drafting_factor", AntFeDraftingFactor),
+            ))
+        if supports_control(device, CONTROL_FE_USER_CONFIGURATION):
+            specs.extend((
                 ("fe_user_weight", AntFeUserWeight),
                 ("fe_bicycle_weight", AntFeBicycleWeight),
                 ("fe_wheel_diameter", AntFeWheelDiameter),
                 ("fe_gear_ratio", AntFeGearRatio),
             ))
-        if DEVICE_TYPE_LEV in device.profiles:
+        if supports_control(device, CONTROL_LEV):
             specs.extend((
                 ("lev_assist_level", AntLevAssistLevel),
                 ("lev_regenerative_level", AntLevRegenerativeLevel),
@@ -55,9 +70,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
                 ("lev_wheel_circumference", AntLevWheelCircumference),
                 ("lev_command_manufacturer_id", AntLevCommandManufacturerId),
             ))
-        if DEVICE_TYPE_DROPPER in device.profiles:
+        if supports_control(device, CONTROL_DROPPER):
             specs.append(("dropper_unlock_delay", AntDropperUnlockDelay))
-        if DEVICE_TYPE_TIRE_PRESSURE in device.profiles:
+        if supports_control(device, CONTROL_TPMS_CONFIGURATION):
             specs.extend((
                 ("tpms_barometric_pressure", AntTpmsBarometricPressure),
                 ("tpms_low_pressure_alarm", AntTpmsLowPressureAlarm),
@@ -79,6 +94,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
 
 class _AntControlNumber(AntPlusEntity, NumberEntity):
     control_profile: int
+    capability: str
     def __init__(self, receiver, device, key, name, minimum, maximum, step, unit=None):
         AntPlusEntity.__init__(self, receiver, device, "__control__")
         self._attr_unique_id=f"{device.device_id}_{key}"
@@ -92,46 +108,32 @@ class _AntControlNumber(AntPlusEntity, NumberEntity):
     @property
     def native_value(self): return self._value
     @property
-    def available(self): return device_control_available(self.receiver, self.ant_device_id, self.control_profile)
-
-
-def _fe_capability_available(entity, capability: str) -> bool:
-    if not device_control_available(
-        entity.receiver, entity.ant_device_id, DEVICE_TYPE_FITNESS_EQUIPMENT
-    ):
-        return False
-    capabilities = entity.ant_device.decoder_state.get("fe_capabilities")
-    if not isinstance(capabilities, dict):
-        # FE-C capability page is optional/periodic from HA's perspective. Keep
-        # controls usable until the equipment explicitly says a mode is absent.
-        return True
-    return bool(capabilities.get(capability, False))
+    def available(self):
+        return (
+            device_control_available(self.receiver, self.ant_device_id, self.control_profile)
+            and supports_control(self.ant_device, self.capability)
+        )
 
 
 class AntFeTargetPower(_AntControlNumber):
     control_profile=DEVICE_TYPE_FITNESS_EQUIPMENT
+    capability=CONTROL_FE_TARGET_POWER
     def __init__(self,r,d): super().__init__(r,d,"fe_target_power","Target Power",0,4000,1,"W")
-    @property
-    def available(self): return _fe_capability_available(self, "target_power")
     async def async_set_native_value(self,value):
         await async_send(self.receiver,self.ant_device_id,self.control_profile,fe_target_power_payload(value)); self._value=value; self.async_write_ha_state()
 
 class AntFeBasicResistance(_AntControlNumber):
     control_profile=DEVICE_TYPE_FITNESS_EQUIPMENT
+    capability=CONTROL_FE_BASIC_RESISTANCE
     def __init__(self,r,d): super().__init__(r,d,"fe_basic_resistance","Basic Resistance",0,100,0.5,"%")
-    @property
-    def available(self): return _fe_capability_available(self, "basic_resistance")
     async def async_set_native_value(self,value):
         await async_send(self.receiver,self.ant_device_id,self.control_profile,fe_basic_resistance_payload(value)); self._value=value; self.async_write_ha_state()
 
 class _FeSimulationNumber(_AntControlNumber):
     control_profile = DEVICE_TYPE_FITNESS_EQUIPMENT
+    capability = CONTROL_FE_SIMULATION
     state_group = ""
     field = ""
-
-    @property
-    def available(self):
-        return _fe_capability_available(self, "simulation")
 
     async def async_set_native_value(self, value):
         state = self.ant_device.decoder_state.setdefault(self.state_group, {})
@@ -180,24 +182,29 @@ class AntFeDraftingFactor(_FeSimulationNumber):
     def __init__(self,r,d): super().__init__(r,d,"fe_drafting_factor","Drafting Factor",0,1,0.01)
 
 class AntFeUserWeight(_FeSimulationNumber):
+    capability=CONTROL_FE_USER_CONFIGURATION
     state_group="fe_user_control"; field="user_weight_kg"
     def __init__(self,r,d): super().__init__(r,d,"fe_user_weight","User Weight",0,655.34,0.01,"kg")
 
 class AntFeBicycleWeight(_FeSimulationNumber):
+    capability=CONTROL_FE_USER_CONFIGURATION
     state_group="fe_user_control"; field="bicycle_weight_kg"
     def __init__(self,r,d): super().__init__(r,d,"fe_bicycle_weight","Bicycle Weight",0,50,0.05,"kg")
 
 class AntFeWheelDiameter(_FeSimulationNumber):
+    capability=CONTROL_FE_USER_CONFIGURATION
     state_group="fe_user_control"; field="wheel_diameter_m"
     def __init__(self,r,d): super().__init__(r,d,"fe_wheel_diameter","Wheel Diameter",0,2.54,0.001,"m")
 
 class AntFeGearRatio(_FeSimulationNumber):
+    capability=CONTROL_FE_USER_CONFIGURATION
     state_group="fe_user_control"; field="gear_ratio"
     def __init__(self,r,d): super().__init__(r,d,"fe_gear_ratio","Gear Ratio",0.03,7.65,0.03)
 
 
 class _LevNumber(_AntControlNumber):
     control_profile=DEVICE_TYPE_LEV
+    capability=CONTROL_LEV
     field=""
     def _current(self):
         state=self.ant_device.decoder_state.setdefault("lev_control",{})
@@ -229,6 +236,7 @@ class AntLevCommandManufacturerId(_LevNumber):
 
 class AntDropperUnlockDelay(_AntControlNumber):
     control_profile=DEVICE_TYPE_DROPPER
+    capability=CONTROL_DROPPER
     def __init__(self,r,d): super().__init__(r,d,"dropper_unlock_delay","Unlock Delay",0,1.26,0.01,"s")
     async def async_set_native_value(self,value):
         state=self.ant_device.decoder_state.setdefault("dropper_control",{}); state["unlock_delay_s"]=float(value); state["sequence"]=(int(state.get("sequence",0))+1)&0xFF
@@ -238,6 +246,7 @@ class AntDropperUnlockDelay(_AntControlNumber):
 
 class _TpmsNumber(_AntControlNumber):
     control_profile=DEVICE_TYPE_TIRE_PRESSURE
+    capability=CONTROL_TPMS_CONFIGURATION
     field=""
     flag=""
     def __init__(self,r,d,key,name): super().__init__(r,d,key,name,0,65535,1,"mbar")

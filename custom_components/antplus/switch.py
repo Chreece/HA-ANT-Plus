@@ -10,6 +10,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .adapter import AntAdapterManager, AdapterPresence
 from .const import DOMAIN, DEVICE_TYPE_DROPPER, DEVICE_TYPE_LEV
+from .capabilities import CONTROL_DROPPER, CONTROL_LEV, supports_control
 from .subentries import ensure_adapter_subentry, ensure_sensor_subentry
 from .control import async_send, device_control_available, dropper_payload, lev_payload
 from .entity import AntPlusEntity
@@ -52,9 +53,9 @@ async def async_setup_entry(
     def add_device_controls(device: AntDevice) -> None:
         entities = []
         specs = []
-        if DEVICE_TYPE_DROPPER in device.profiles:
+        if supports_control(device, CONTROL_DROPPER):
             specs.append(("dropper_valve", AntDropperValveSwitch))
-        if DEVICE_TYPE_LEV in device.profiles:
+        if supports_control(device, CONTROL_LEV):
             specs.extend((
                 ("lev_lights", AntLevLightsSwitch),
                 ("lev_high_beam", AntLevHighBeamSwitch),
@@ -153,6 +154,7 @@ class AntUsbAdapterCaptureSwitch(SwitchEntity):
 
 class _AntControlSwitch(AntPlusEntity, SwitchEntity):
     control_profile: int
+    capability: str
     state_key: str
     def __init__(self, receiver, device, key, name, icon):
         AntPlusEntity.__init__(self, receiver, device, "__control__")
@@ -161,13 +163,16 @@ class _AntControlSwitch(AntPlusEntity, SwitchEntity):
         self._attr_icon=icon
     @property
     def available(self):
-        return device_control_available(self.receiver,self.ant_device_id,self.control_profile)
+        return (
+            device_control_available(self.receiver,self.ant_device_id,self.control_profile)
+            and supports_control(self.ant_device, self.capability)
+        )
     @property
     def is_on(self):
         return bool(self.ant_device.decoder_state.get(self.state_key,{}).get(self.field,False))
 
 class AntDropperValveSwitch(_AntControlSwitch):
-    control_profile=DEVICE_TYPE_DROPPER; state_key="dropper_control"; field="unlocked"
+    control_profile=DEVICE_TYPE_DROPPER; capability=CONTROL_DROPPER; state_key="dropper_control"; field="unlocked"
     def __init__(self,r,d): super().__init__(r,d,"dropper_valve","Valve Unlocked","mdi:seat")
     async def _set(self,value):
         state=self.ant_device.decoder_state.setdefault(self.state_key,{})
@@ -178,7 +183,7 @@ class AntDropperValveSwitch(_AntControlSwitch):
     async def async_turn_off(self,**kwargs): await self._set(False)
 
 class _LevSwitch(_AntControlSwitch):
-    control_profile=DEVICE_TYPE_LEV; state_key="lev_control"
+    control_profile=DEVICE_TYPE_LEV; capability=CONTROL_LEV; state_key="lev_control"
     async def _set(self,value):
         state=self.ant_device.decoder_state.setdefault(self.state_key,{})
         state[self.field]=value
