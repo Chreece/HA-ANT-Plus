@@ -12,6 +12,7 @@ from .const import (
     DEVICE_TYPE_CONTROLS,
     DEVICE_TYPE_DROPPER,
     DEVICE_TYPE_FITNESS_EQUIPMENT,
+    DEVICE_TYPE_POWER,
     DEVICE_TYPE_SHIFTING,
     DOMAIN,
     profile_name,
@@ -105,6 +106,49 @@ def async_register_event_dispatcher(
             )
             return
 
+        if device_type == DEVICE_TYPE_FITNESS_EQUIPMENT and (payload[0] & 0x7F) in (0x01, 0x02):
+            page = payload[0] & 0x7F
+            if page == 0x01:
+                response = payload[1]
+                key = (page, bytes(payload[1:8]))
+                if device.decoder_state.get("fe_calibration_event") == key:
+                    return
+                device.decoder_state["fe_calibration_event"] = key
+                emit(
+                    device,
+                    device_type,
+                    "calibration_response",
+                    {
+                        "zero_offset_success": bool(response & 0x40),
+                        "spin_down_success": bool(response & 0x80),
+                        "temperature_raw": payload[3],
+                        "zero_offset_raw": payload[4] | (payload[5] << 8),
+                        "spin_down_time_raw": payload[6] | (payload[7] << 8),
+                        "transmission_type": transmission_type,
+                        "source": source,
+                    },
+                )
+            else:
+                key = (page, bytes(payload[1:8]))
+                if device.decoder_state.get("fe_calibration_progress_event") == key:
+                    return
+                device.decoder_state["fe_calibration_progress_event"] = key
+                emit(
+                    device,
+                    device_type,
+                    "calibration_progress",
+                    {
+                        "zero_offset_pending": bool(payload[1] & 0x40),
+                        "spin_down_pending": bool(payload[1] & 0x80),
+                        "temperature_raw": payload[3],
+                        "target_speed_raw": payload[4] | (payload[5] << 8),
+                        "target_spin_down_time_raw": payload[6] | (payload[7] << 8),
+                        "transmission_type": transmission_type,
+                        "source": source,
+                    },
+                )
+            return
+
         if device_type == DEVICE_TYPE_FITNESS_EQUIPMENT and (payload[0] & 0x7F) == 0x47:
             command_id = payload[1]
             status_raw = payload[3]
@@ -121,6 +165,24 @@ def async_register_event_dispatcher(
                     "status": {0: "pass", 1: "fail", 2: "not_supported", 3: "rejected", 4: "pending", 255: "uninitialized"}.get(status_raw, "unknown"),
                     "status_raw": status_raw,
                     "response_raw": payload[4:8].hex(),
+                    "transmission_type": transmission_type,
+                    "source": source,
+                },
+            )
+            return
+
+        if device_type == DEVICE_TYPE_POWER and (payload[0] & 0x7F) == 0x01:
+            key = bytes(payload[1:8])
+            if device.decoder_state.get("power_calibration_event") == key:
+                return
+            device.decoder_state["power_calibration_event"] = key
+            emit(
+                device,
+                device_type,
+                "calibration_response",
+                {
+                    "calibration_id": payload[1],
+                    "data_raw": payload[2:8].hex(),
                     "transmission_type": transmission_type,
                     "source": source,
                 },

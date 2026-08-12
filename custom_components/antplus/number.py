@@ -13,6 +13,9 @@ from .control import (
     dropper_payload,
     fe_basic_resistance_payload,
     fe_target_power_payload,
+    fe_track_resistance_payload,
+    fe_user_configuration_payload,
+    fe_wind_resistance_payload,
     lev_payload,
     tpms_parameter_payload,
 )
@@ -33,6 +36,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
             specs.extend((
                 ("fe_target_power", AntFeTargetPower),
                 ("fe_basic_resistance", AntFeBasicResistance),
+                ("fe_grade", AntFeGrade),
+                ("fe_rolling_resistance", AntFeRollingResistance),
+                ("fe_wind_resistance", AntFeWindResistance),
+                ("fe_wind_speed", AntFeWindSpeed),
+                ("fe_drafting_factor", AntFeDraftingFactor),
+                ("fe_user_weight", AntFeUserWeight),
+                ("fe_bicycle_weight", AntFeBicycleWeight),
+                ("fe_wheel_diameter", AntFeWheelDiameter),
+                ("fe_gear_ratio", AntFeGearRatio),
             ))
         if DEVICE_TYPE_LEV in device.profiles:
             specs.extend((
@@ -82,17 +94,107 @@ class _AntControlNumber(AntPlusEntity, NumberEntity):
     @property
     def available(self): return device_control_available(self.receiver, self.ant_device_id, self.control_profile)
 
+
+def _fe_capability_available(entity, capability: str) -> bool:
+    if not device_control_available(
+        entity.receiver, entity.ant_device_id, DEVICE_TYPE_FITNESS_EQUIPMENT
+    ):
+        return False
+    capabilities = entity.ant_device.decoder_state.get("fe_capabilities")
+    if not isinstance(capabilities, dict):
+        # FE-C capability page is optional/periodic from HA's perspective. Keep
+        # controls usable until the equipment explicitly says a mode is absent.
+        return True
+    return bool(capabilities.get(capability, False))
+
+
 class AntFeTargetPower(_AntControlNumber):
     control_profile=DEVICE_TYPE_FITNESS_EQUIPMENT
     def __init__(self,r,d): super().__init__(r,d,"fe_target_power","Target Power",0,4000,1,"W")
+    @property
+    def available(self): return _fe_capability_available(self, "target_power")
     async def async_set_native_value(self,value):
         await async_send(self.receiver,self.ant_device_id,self.control_profile,fe_target_power_payload(value)); self._value=value; self.async_write_ha_state()
 
 class AntFeBasicResistance(_AntControlNumber):
     control_profile=DEVICE_TYPE_FITNESS_EQUIPMENT
     def __init__(self,r,d): super().__init__(r,d,"fe_basic_resistance","Basic Resistance",0,100,0.5,"%")
+    @property
+    def available(self): return _fe_capability_available(self, "basic_resistance")
     async def async_set_native_value(self,value):
         await async_send(self.receiver,self.ant_device_id,self.control_profile,fe_basic_resistance_payload(value)); self._value=value; self.async_write_ha_state()
+
+class _FeSimulationNumber(_AntControlNumber):
+    control_profile = DEVICE_TYPE_FITNESS_EQUIPMENT
+    state_group = ""
+    field = ""
+
+    @property
+    def available(self):
+        return _fe_capability_available(self, "simulation")
+
+    async def async_set_native_value(self, value):
+        state = self.ant_device.decoder_state.setdefault(self.state_group, {})
+        state[self.field] = float(value)
+        if self.state_group == "fe_track_control":
+            payload = fe_track_resistance_payload(
+                grade_percent=state.get("grade_percent"),
+                rolling_resistance_coefficient=state.get("rolling_resistance_coefficient"),
+            )
+        elif self.state_group == "fe_wind_control":
+            payload = fe_wind_resistance_payload(
+                wind_resistance_coefficient=state.get("wind_resistance_coefficient"),
+                wind_speed_kmh=state.get("wind_speed_kmh"),
+                drafting_factor=state.get("drafting_factor"),
+            )
+        else:
+            payload = fe_user_configuration_payload(
+                user_weight_kg=state.get("user_weight_kg"),
+                bicycle_weight_kg=state.get("bicycle_weight_kg"),
+                wheel_diameter_m=state.get("wheel_diameter_m"),
+                gear_ratio=state.get("gear_ratio"),
+            )
+        await async_send(self.receiver, self.ant_device_id, self.control_profile, payload)
+        self._value = value
+        self.async_write_ha_state()
+
+
+class AntFeGrade(_FeSimulationNumber):
+    state_group="fe_track_control"; field="grade_percent"
+    def __init__(self,r,d): super().__init__(r,d,"fe_grade","Simulation Grade",-200,200,0.01,"%")
+
+class AntFeRollingResistance(_FeSimulationNumber):
+    state_group="fe_track_control"; field="rolling_resistance_coefficient"
+    def __init__(self,r,d): super().__init__(r,d,"fe_rolling_resistance","Rolling Resistance Coefficient",0,0.0127,0.00005)
+
+class AntFeWindResistance(_FeSimulationNumber):
+    state_group="fe_wind_control"; field="wind_resistance_coefficient"
+    def __init__(self,r,d): super().__init__(r,d,"fe_wind_resistance","Wind Resistance Coefficient",0,1.86,0.01,"kg/m")
+
+class AntFeWindSpeed(_FeSimulationNumber):
+    state_group="fe_wind_control"; field="wind_speed_kmh"
+    def __init__(self,r,d): super().__init__(r,d,"fe_wind_speed","Simulation Wind Speed",-127,127,1,"km/h")
+
+class AntFeDraftingFactor(_FeSimulationNumber):
+    state_group="fe_wind_control"; field="drafting_factor"
+    def __init__(self,r,d): super().__init__(r,d,"fe_drafting_factor","Drafting Factor",0,1,0.01)
+
+class AntFeUserWeight(_FeSimulationNumber):
+    state_group="fe_user_control"; field="user_weight_kg"
+    def __init__(self,r,d): super().__init__(r,d,"fe_user_weight","User Weight",0,655.34,0.01,"kg")
+
+class AntFeBicycleWeight(_FeSimulationNumber):
+    state_group="fe_user_control"; field="bicycle_weight_kg"
+    def __init__(self,r,d): super().__init__(r,d,"fe_bicycle_weight","Bicycle Weight",0,50,0.05,"kg")
+
+class AntFeWheelDiameter(_FeSimulationNumber):
+    state_group="fe_user_control"; field="wheel_diameter_m"
+    def __init__(self,r,d): super().__init__(r,d,"fe_wheel_diameter","Wheel Diameter",0,2.54,0.001,"m")
+
+class AntFeGearRatio(_FeSimulationNumber):
+    state_group="fe_user_control"; field="gear_ratio"
+    def __init__(self,r,d): super().__init__(r,d,"fe_gear_ratio","Gear Ratio",0.03,7.65,0.03)
+
 
 class _LevNumber(_AntControlNumber):
     control_profile=DEVICE_TYPE_LEV

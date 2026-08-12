@@ -5,14 +5,32 @@ from datetime import datetime, timezone
 
 from .const import (
     DEVICE_INACTIVITY_TIMEOUT,
+    DEVICE_TYPE_CONTROLS,
     DEVICE_TYPE_DROPPER,
     DEVICE_TYPE_FITNESS_EQUIPMENT,
     DEVICE_TYPE_LEV,
+    DEVICE_TYPE_POWER,
     DEVICE_TYPE_TIRE_PRESSURE,
 )
 
 
+GENERIC_CONTROL_COMMANDS = {
+    "menu_up": 0,
+    "menu_down": 1,
+    "select": 2,
+    "back": 3,
+    "home": 4,
+    "timer_start": 32,
+    "timer_stop": 33,
+    "timer_reset": 34,
+    "length": 35,
+    "lap": 36,
+}
+
+
 PROFILE_PERIOD = {
+    DEVICE_TYPE_CONTROLS: 8192,
+    DEVICE_TYPE_POWER: 8182,
     DEVICE_TYPE_FITNESS_EQUIPMENT: 8192,
     DEVICE_TYPE_LEV: 8192,
     DEVICE_TYPE_DROPPER: 8192,
@@ -32,6 +50,156 @@ def fe_basic_resistance_payload(resistance_percent: float) -> bytes:
         raise ValueError("Basic resistance must be between 0 and 100 %")
     raw = int(round(resistance_percent * 2))
     return bytes((0x30, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, raw & 0xFF))
+
+
+
+def controls_generic_payload(
+    command: str | int,
+    *,
+    sequence: int = 0,
+    controller_serial: int = 0xFFFF,
+    controller_manufacturer_id: int = 0xFFFF,
+) -> bytes:
+    """Build ANT+ Controls Generic Command common page 73 (0x49)."""
+    if isinstance(command, str):
+        try:
+            command_raw = GENERIC_CONTROL_COMMANDS[command]
+        except KeyError as err:
+            raise ValueError(f"Unknown ANT+ generic control command: {command}") from err
+    else:
+        command_raw = int(command)
+    if not 0 <= command_raw <= 0xFFFF:
+        raise ValueError("ANT+ generic command must fit 16 bits")
+    if not 0 <= int(sequence) <= 0xFF:
+        raise ValueError("ANT+ generic control sequence must be 0..255")
+    if not 0 <= int(controller_serial) <= 0xFFFF:
+        raise ValueError("Controller serial must fit 16 bits")
+    if not 0 <= int(controller_manufacturer_id) <= 0xFFFF:
+        raise ValueError("Controller manufacturer ID must fit 16 bits")
+    return bytes((
+        0x49,
+        int(controller_serial) & 0xFF,
+        (int(controller_serial) >> 8) & 0xFF,
+        int(controller_manufacturer_id) & 0xFF,
+        (int(controller_manufacturer_id) >> 8) & 0xFF,
+        int(sequence) & 0xFF,
+        command_raw & 0xFF,
+        (command_raw >> 8) & 0xFF,
+    ))
+
+
+def fe_wind_resistance_payload(
+    *,
+    wind_resistance_coefficient: float | None = None,
+    wind_speed_kmh: float | None = None,
+    drafting_factor: float | None = None,
+) -> bytes:
+    """Build FE-C page 50 (0x32) simulation wind resistance command."""
+    if wind_resistance_coefficient is None:
+        coefficient_raw = 0xFF
+    else:
+        if not 0 <= wind_resistance_coefficient <= 1.86:
+            raise ValueError("Wind resistance coefficient must be 0..1.86 kg/m")
+        coefficient_raw = int(round(wind_resistance_coefficient / 0.01))
+    if wind_speed_kmh is None:
+        wind_raw = 0xFF
+    else:
+        if not -127 <= wind_speed_kmh <= 127:
+            raise ValueError("Wind speed must be -127..127 km/h")
+        wind_raw = int(round(wind_speed_kmh + 127))
+    if drafting_factor is None:
+        drafting_raw = 0xFF
+    else:
+        if not 0 <= drafting_factor <= 1.0:
+            raise ValueError("Drafting factor must be 0..1.0")
+        drafting_raw = int(round(drafting_factor / 0.01))
+    return bytes((0x32, 0xFF, 0xFF, 0xFF, 0xFF, coefficient_raw, wind_raw, drafting_raw))
+
+
+def fe_track_resistance_payload(
+    *,
+    grade_percent: float | None = None,
+    rolling_resistance_coefficient: float | None = None,
+) -> bytes:
+    """Build FE-C page 51 (0x33) simulation track resistance command."""
+    if grade_percent is None:
+        grade_raw = 0xFFFF
+    else:
+        if not -200 <= grade_percent <= 200:
+            raise ValueError("Grade must be -200..200 %")
+        grade_raw = int(round((grade_percent + 200.0) / 0.01))
+    if rolling_resistance_coefficient is None:
+        rolling_raw = 0xFF
+    else:
+        if not 0 <= rolling_resistance_coefficient <= 0.0127:
+            raise ValueError("Rolling resistance coefficient must be 0..0.0127")
+        rolling_raw = int(round(rolling_resistance_coefficient / 0.00005))
+    return bytes((
+        0x33, 0xFF, 0xFF, 0xFF, 0xFF,
+        grade_raw & 0xFF, (grade_raw >> 8) & 0xFF, rolling_raw & 0xFF,
+    ))
+
+
+def fe_user_configuration_payload(
+    *,
+    user_weight_kg: float | None = None,
+    bicycle_weight_kg: float | None = None,
+    wheel_diameter_m: float | None = None,
+    gear_ratio: float | None = None,
+) -> bytes:
+    """Build FE-C page 55 (0x37) user configuration for simulation mode."""
+    if user_weight_kg is None:
+        user_raw = 0xFFFF
+    else:
+        if not 0 <= user_weight_kg <= 655.34:
+            raise ValueError("User weight must be 0..655.34 kg")
+        user_raw = int(round(user_weight_kg / 0.01))
+
+    if bicycle_weight_kg is None:
+        bike_raw = 0xFFF
+    else:
+        if not 0 <= bicycle_weight_kg <= 50:
+            raise ValueError("Bicycle weight must be 0..50 kg")
+        bike_raw = int(round(bicycle_weight_kg / 0.05))
+
+    if wheel_diameter_m is None:
+        wheel_raw = 0xFF
+        wheel_offset = 0x0F
+    else:
+        if not 0 <= wheel_diameter_m <= 2.54:
+            raise ValueError("Wheel diameter must be 0..2.54 m")
+        millimetres = int(round(wheel_diameter_m * 1000))
+        wheel_raw = min(millimetres // 10, 0xFE)
+        wheel_offset = millimetres - (wheel_raw * 10)
+        if wheel_offset > 10:
+            wheel_offset = 10
+
+    if gear_ratio is None:
+        gear_raw = 0x00
+    else:
+        if not 0.03 <= gear_ratio <= 7.65:
+            raise ValueError("Gear ratio must be 0.03..7.65")
+        gear_raw = int(round(gear_ratio / 0.03))
+
+    packed_weight = ((wheel_offset & 0x0F) << 4) | (bike_raw & 0x0F)
+    return bytes((
+        0x37,
+        user_raw & 0xFF, (user_raw >> 8) & 0xFF,
+        0xFF,
+        packed_weight, (bike_raw >> 4) & 0xFF,
+        wheel_raw & 0xFF, gear_raw & 0xFF,
+    ))
+
+
+def fe_calibration_payload(*, zero_offset: bool = False, spin_down: bool = False) -> bytes:
+    """Build FE-C page 1 calibration request; both False cancels calibration."""
+    request = (0x40 if zero_offset else 0) | (0x80 if spin_down else 0)
+    return bytes((0x01, request, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF))
+
+
+def bicycle_power_manual_calibration_payload() -> bytes:
+    """Build Bicycle Power page 1 manual-zero calibration request."""
+    return bytes((0x01, 0xAA, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF))
 
 
 def lev_payload(

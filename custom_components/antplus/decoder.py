@@ -503,7 +503,34 @@ def _decode_fitness_equipment(device: AntDevice, data: bytes) -> list[AntMetric]
     page = data[0] & 0x7F
     metrics: list[AntMetric] = []
 
-    if page == 0x10:
+    if page == 0x01:
+        response = data[1]
+        metrics.extend([
+            _metric("calibration_zero_offset_status", "Zero Offset Calibration Status", "success" if response & 0x40 else "not_requested_or_failed", icon="mdi:scale-balance", entity_category=EntityCategory.DIAGNOSTIC),
+            _metric("calibration_spin_down_status", "Spin Down Calibration Status", "success" if response & 0x80 else "not_requested_or_failed", icon="mdi:rotate-360", entity_category=EntityCategory.DIAGNOSTIC),
+        ])
+        if data[3] != 0xFF:
+            metrics.append(_metric("calibration_temperature", "Calibration Temperature", round((data[3] * 0.5) - 25.0, 1), "°C", "temperature", "measurement", "mdi:thermometer", EntityCategory.DIAGNOSTIC))
+        zero_offset = int.from_bytes(data[4:6], "little")
+        if zero_offset != 0xFFFF:
+            metrics.append(_metric("calibration_zero_offset", "Calibration Zero Offset", zero_offset, icon="mdi:counter", entity_category=EntityCategory.DIAGNOSTIC))
+        spin_down = int.from_bytes(data[6:8], "little")
+        if spin_down != 0xFFFF:
+            metrics.append(_metric("calibration_spin_down_time", "Calibration Spin Down Time", spin_down, "ms", state_class="measurement", icon="mdi:timer-outline", entity_category=EntityCategory.DIAGNOSTIC))
+    elif page == 0x02:
+        metrics.extend([
+            _metric("calibration_zero_offset_pending", "Zero Offset Calibration Pending", bool(data[1] & 0x40), icon="mdi:progress-wrench", entity_category=EntityCategory.DIAGNOSTIC),
+            _metric("calibration_spin_down_pending", "Spin Down Calibration Pending", bool(data[1] & 0x80), icon="mdi:progress-wrench", entity_category=EntityCategory.DIAGNOSTIC),
+        ])
+        if data[3] != 0xFF:
+            metrics.append(_metric("calibration_current_temperature", "Calibration Current Temperature", round((data[3] * 0.5) - 25.0, 1), "°C", "temperature", "measurement", "mdi:thermometer", EntityCategory.DIAGNOSTIC))
+        target_speed = int.from_bytes(data[4:6], "little")
+        if target_speed != 0xFFFF:
+            metrics.append(_metric("calibration_target_speed", "Calibration Target Speed", round(target_speed / 1000.0, 3), "m/s", "speed", "measurement", "mdi:speedometer", EntityCategory.DIAGNOSTIC))
+        target_time = int.from_bytes(data[6:8], "little")
+        if target_time != 0xFFFF:
+            metrics.append(_metric("calibration_target_spin_down_time", "Calibration Target Spin Down Time", target_time, "ms", state_class="measurement", icon="mdi:timer-outline", entity_category=EntityCategory.DIAGNOSTIC))
+    elif page == 0x10:
         speed = int.from_bytes(data[4:6], "little") / 1000.0
         if speed < 65.535:
             metrics.extend([
@@ -548,6 +575,47 @@ def _decode_fitness_equipment(device: AntDevice, data: bytes) -> list[AntMetric]
                     "power", "measurement", "mdi:flash"
                 )
             )
+    elif page == 0x32:
+        if data[5] != 0xFF:
+            metrics.append(_metric("simulation_wind_resistance", "Simulation Wind Resistance Coefficient", round(data[5] * 0.01, 2), "kg/m", state_class="measurement", icon="mdi:weather-windy"))
+        if data[6] != 0xFF:
+            metrics.append(_metric("simulation_wind_speed", "Simulation Wind Speed", data[6] - 127, "km/h", "speed", "measurement", "mdi:weather-windy"))
+        if data[7] != 0xFF:
+            metrics.append(_metric("simulation_drafting_factor", "Simulation Drafting Factor", round(data[7] * 0.01, 2), state_class="measurement", icon="mdi:account-multiple"))
+    elif page == 0x33:
+        grade_raw = int.from_bytes(data[5:7], "little")
+        if grade_raw != 0xFFFF:
+            metrics.append(_metric("simulation_grade", "Simulation Grade", round((grade_raw * 0.01) - 200.0, 2), "%", state_class="measurement", icon="mdi:slope-uphill"))
+        if data[7] != 0xFF:
+            metrics.append(_metric("simulation_rolling_resistance", "Simulation Rolling Resistance Coefficient", round(data[7] * 0.00005, 5), state_class="measurement", icon="mdi:road-variant"))
+    elif page == 0x36:
+        maximum = int.from_bytes(data[5:7], "little")
+        if maximum != 0xFFFF:
+            metrics.append(_metric("maximum_resistance", "Maximum Resistance", maximum, "N", state_class="measurement", icon="mdi:gauge"))
+        capabilities = data[7]
+        device.decoder_state["fe_capabilities"] = {
+            "basic_resistance": bool(capabilities & 0x01),
+            "target_power": bool(capabilities & 0x02),
+            "simulation": bool(capabilities & 0x04),
+        }
+        metrics.extend([
+            _metric("supports_basic_resistance", "Supports Basic Resistance", bool(capabilities & 0x01), icon="mdi:gauge", entity_category=EntityCategory.DIAGNOSTIC),
+            _metric("supports_target_power", "Supports Target Power", bool(capabilities & 0x02), icon="mdi:flash", entity_category=EntityCategory.DIAGNOSTIC),
+            _metric("supports_simulation", "Supports Simulation", bool(capabilities & 0x04), icon="mdi:slope-uphill", entity_category=EntityCategory.DIAGNOSTIC),
+        ])
+    elif page == 0x37:
+        user_raw = int.from_bytes(data[1:3], "little")
+        if user_raw != 0xFFFF:
+            metrics.append(_metric("configured_user_weight", "Configured User Weight", round(user_raw * 0.01, 2), "kg", "weight", "measurement", "mdi:weight"))
+        wheel_offset = (data[4] >> 4) & 0x0F
+        bike_raw = (data[4] & 0x0F) | (data[5] << 4)
+        if bike_raw != 0xFFF:
+            metrics.append(_metric("configured_bicycle_weight", "Configured Bicycle Weight", round(bike_raw * 0.05, 2), "kg", "weight", "measurement", "mdi:bike"))
+        if data[6] != 0xFF:
+            diameter = data[6] * 0.01 + (0 if wheel_offset == 0x0F else wheel_offset * 0.001)
+            metrics.append(_metric("configured_wheel_diameter", "Configured Wheel Diameter", round(diameter, 3), "m", state_class="measurement", icon="mdi:circle-outline"))
+        if data[7] != 0:
+            metrics.append(_metric("configured_gear_ratio", "Configured Gear Ratio", round(data[7] * 0.03, 2), state_class="measurement", icon="mdi:cog"))
     elif page == 0x47:
         command_id = data[1]
         status_raw = data[3]
