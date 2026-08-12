@@ -1,3 +1,14 @@
+## 2026.8.10
+
+- Expand Controls Device support with dedicated Home Assistant buttons for Generic Control menu navigation and timer Start, Stop, Reset, Lap and Length commands, plus `antplus.send_generic_control`.
+- Add full FE-C trainer-mode controls for simulation grade, rolling resistance, wind resistance, wind speed and drafting factor in addition to the existing Target Power and Basic Resistance controls.
+- Add FE-C user-configuration controls for user weight, bicycle weight, wheel diameter and gear ratio.
+- Add FE-C zero-offset/spin-down calibration buttons, calibration progress/result metrics and `antplus_event` calibration events.
+- Add an FE-C Request Capabilities button and use received capability information to disable unsupported Basic Resistance, Target Power or Simulation controls.
+- Add Bicycle Power manual-calibration control and calibration-response events.
+- Route every new semantic command through the existing confirmed adapter-control transport, preserving identical behavior for local ANT USB adapters and remote gateways.
+- Keep Generic Control timer Stop distinct from Audio/Video Pause: Pause belongs to the ANT+ Audio/Video control use cases and is not fabricated as a Generic Control command.
+
 ## 2026.8.9
 
 - Replace per-sensor receiver-state callbacks with one integration-level callback, eliminating callback fanout as multi-profile devices create many entities.

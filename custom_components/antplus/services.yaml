@@ -58,3 +58,42 @@ dump_diagnostics:
 reset_diagnostics:
   name: Reset ANT+ diagnostics
   description: Reset ANT+ runtime counters and timing data before reproducing a performance problem.
+
+send_generic_control:
+  name: Send ANT+ generic control
+  description: Send a documented ANT+ Generic Control menu/timer command through the local or remote adapter that has seen the target Controls device.
+  fields:
+    device_id:
+      name: Device ID
+      required: true
+      selector: {number: {min: 0, max: 65535, mode: box}}
+    transmission_type:
+      name: Transmission type
+      required: false
+      selector: {number: {min: 0, max: 255, mode: box}}
+    command:
+      name: Command
+      required: true
+      selector:
+        select:
+          options:
+            - menu_up
+            - menu_down
+            - select
+            - back
+            - home
+            - timer_start
+            - timer_stop
+            - timer_reset
+            - length
+            - lap
+    controller_serial:
+      name: Controller serial
+      description: Optional 16-bit controller identity used in Common Page 73. 65535 means unspecified.
+      default: 65535
+      selector: {number: {min: 0, max: 65535, mode: box}}
+    controller_manufacturer_id:
+      name: Controller manufacturer ID
+      description: Optional ANT+ manufacturer identity. 65535 means unspecified.
+      default: 65535
+      selector: {number: {min: 0, max: 65535, mode: box}}
