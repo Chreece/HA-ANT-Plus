@@ -17,6 +17,16 @@ from .const import (
     DOMAIN,
     profile_name,
 )
+from .capabilities import (
+    EVENT_CONTROLS_AVAILABILITY,
+    EVENT_DROPPER,
+    EVENT_FE_CALIBRATION,
+    EVENT_FE_COMMAND_STATUS,
+    EVENT_GENERIC_CONTROL,
+    EVENT_POWER_CALIBRATION,
+    EVENT_SHIFT,
+    supports_event,
+)
 from .models import AntDevice
 from .receiver import AntPlusReceiver
 
@@ -63,7 +73,11 @@ def async_register_event_dispatcher(
         # ANT+ Controls Device generic command page (0x49). Commands are ACK
         # packets, but scan/gateway transport presents all received packet
         # types through the same confirmed packet callback.
-        if device_type == DEVICE_TYPE_CONTROLS and payload[0] == 0x02:
+        if (
+            device_type == DEVICE_TYPE_CONTROLS
+            and payload[0] == 0x02
+            and supports_event(device, EVENT_CONTROLS_AVAILABILITY)
+        ):
             availability_key = (payload[1], payload[7])
             if device.decoder_state.get("controls_availability_event") == availability_key:
                 return
@@ -81,7 +95,11 @@ def async_register_event_dispatcher(
             )
             return
 
-        if device_type == DEVICE_TYPE_CONTROLS and payload[0] == 0x49:
+        if (
+            device_type == DEVICE_TYPE_CONTROLS
+            and payload[0] == 0x49
+            and supports_event(device, EVENT_GENERIC_CONTROL)
+        ):
             sequence = payload[5]
             command_raw = payload[6] | (payload[7] << 8)
             key = (sequence, command_raw)
@@ -106,7 +124,11 @@ def async_register_event_dispatcher(
             )
             return
 
-        if device_type == DEVICE_TYPE_FITNESS_EQUIPMENT and (payload[0] & 0x7F) in (0x01, 0x02):
+        if (
+            device_type == DEVICE_TYPE_FITNESS_EQUIPMENT
+            and (payload[0] & 0x7F) in (0x01, 0x02)
+            and supports_event(device, EVENT_FE_CALIBRATION)
+        ):
             page = payload[0] & 0x7F
             if page == 0x01:
                 response = payload[1]
@@ -149,7 +171,11 @@ def async_register_event_dispatcher(
                 )
             return
 
-        if device_type == DEVICE_TYPE_FITNESS_EQUIPMENT and (payload[0] & 0x7F) == 0x47:
+        if (
+            device_type == DEVICE_TYPE_FITNESS_EQUIPMENT
+            and (payload[0] & 0x7F) == 0x47
+            and supports_event(device, EVENT_FE_COMMAND_STATUS)
+        ):
             command_id = payload[1]
             status_raw = payload[3]
             key = (command_id, status_raw, bytes(payload[4:8]))
@@ -171,7 +197,11 @@ def async_register_event_dispatcher(
             )
             return
 
-        if device_type == DEVICE_TYPE_POWER and (payload[0] & 0x7F) == 0x01:
+        if (
+            device_type == DEVICE_TYPE_POWER
+            and (payload[0] & 0x7F) == 0x01
+            and supports_event(device, EVENT_POWER_CALIBRATION)
+        ):
             key = bytes(payload[1:8])
             if device.decoder_state.get("power_calibration_event") == key:
                 return
@@ -191,7 +221,11 @@ def async_register_event_dispatcher(
 
         # Shifting page 1 has an 8-bit shift event counter. The first packet
         # establishes state; only subsequent counter changes become events.
-        if device_type == DEVICE_TYPE_SHIFTING and (payload[0] & 0x7F) == 0x01:
+        if (
+            device_type == DEVICE_TYPE_SHIFTING
+            and (payload[0] & 0x7F) == 0x01
+            and supports_event(device, EVENT_SHIFT)
+        ):
             count = payload[1]
             old = device.decoder_state.get("ha_event_shift_count")
             device.decoder_state["ha_event_shift_count"] = count
@@ -221,7 +255,11 @@ def async_register_event_dispatcher(
             return
 
         # Dropper page 1 increments its event counter when the valve changes.
-        if device_type == DEVICE_TYPE_DROPPER and (payload[0] & 0x7F) == 0x01:
+        if (
+            device_type == DEVICE_TYPE_DROPPER
+            and (payload[0] & 0x7F) == 0x01
+            and supports_event(device, EVENT_DROPPER)
+        ):
             count = payload[4] | (payload[5] << 8)
             valve_unlocked = bool(payload[7] & 0x80)
             old = device.decoder_state.get("ha_event_dropper_count")

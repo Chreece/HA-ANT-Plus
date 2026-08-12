@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import voluptuous as vol
 from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import config_validation as cv
 
 from .const import DOMAIN
+from .capabilities import CONTROL_GENERIC, supports_control
 from .control import (
     GENERIC_CONTROL_COMMANDS,
     controls_generic_payload,
@@ -60,7 +62,13 @@ def async_register_services(hass: HomeAssistant, receiver) -> None:
 
     async def send_generic_control(call: ServiceCall) -> None:
         device = receiver.devices.get(call.data["device_id"])
-        state = device.decoder_state.setdefault("controls_tx", {}) if device is not None else {}
+        if device is None:
+            raise ServiceValidationError("ANT+ device has not been discovered")
+        if not supports_control(device, CONTROL_GENERIC):
+            raise ServiceValidationError(
+                "ANT+ Generic Control is not supported by this device's resolved capabilities"
+            )
+        state = device.decoder_state.setdefault("controls_tx", {})
         sequence = (int(state.get("sequence", 0)) + 1) & 0xFF
         state["sequence"] = sequence
         await receiver.adapter_manager.async_send_control(
