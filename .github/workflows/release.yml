@@ -8,7 +8,7 @@ jobs:
   validate-release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Verify manifest version matches release tag
         run: |
           python - <<'PY'
