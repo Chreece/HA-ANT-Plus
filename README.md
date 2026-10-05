@@ -7,9 +7,6 @@
 
 # HA ANT+
 
-💙 **Enjoying this hobby project? [Send a voluntary thank-you via Ko-fi](https://ko-fi.com/chreece).**
-
-
 <p align="center"><img src="assets/ha-ant-plus-logo.png" alt="HA ANT+" width="500"></p>
 
 [![HACS validation](https://github.com/Chreece/HA-ANT-Plus/actions/workflows/hacs.yml/badge.svg)](https://github.com/Chreece/HA-ANT-Plus/actions/workflows/hacs.yml)
@@ -56,7 +53,6 @@ The integration also contains a public-documentation capability catalogue for kn
 Unknown or not-yet-semantic pages remain available through one disabled, bounded raw diagnostic entity per device/profile. They never create an unbounded entity per ANT data page.
 
 Because ANT+ devices vary in the pages they transmit, available entities depend on the sensor, firmware and current operating mode.
-
 
 ## Installation
 
